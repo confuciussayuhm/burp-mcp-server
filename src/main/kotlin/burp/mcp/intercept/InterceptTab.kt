@@ -33,6 +33,7 @@ class InterceptTab(
     private lateinit var pendingCountLabel: JLabel
 
     private var selectedMessageId: String? = null
+    private var isRefreshing = false
 
     private val store get() = interceptManager.store
 
@@ -155,24 +156,26 @@ class InterceptTab(
 
     private fun refreshTable() {
         val messages = store.pendingMessages()
+        val selId = selectedMessageId          // snapshot before model change
+
+        isRefreshing = true
         tableModel.setMessages(messages)
         pendingCountLabel.text = "Pending: ${messages.size}"
 
-        // Re-select previously selected message
-        val selId = selectedMessageId
         if (selId != null) {
             val row = tableModel.findRowById(selId)
             if (row >= 0) {
                 table.selectionModel.setSelectionInterval(row, row)
             } else {
-                // Selected message was resolved externally
                 selectedMessageId = null
                 clearEditor()
             }
         }
+        isRefreshing = false
     }
 
     private fun onSelectionChanged() {
+        if (isRefreshing) return
         val row = table.selectedRow
         if (row < 0) {
             selectedMessageId = null
