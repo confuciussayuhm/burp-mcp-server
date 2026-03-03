@@ -1,0 +1,25 @@
+# Gradle
+.gradle/
+
+# Kotlin
+.kotlin/
+
+# Build (keep shadow JAR)
+build/*
+!build/libs/
+build/libs/*
+!build/libs/*.jar
+
+# Extracted dependency artifacts at project root
+io/
+META-INF/
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# OS
+.DS_Store
+Thumbs.db
