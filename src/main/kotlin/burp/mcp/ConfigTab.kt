@@ -173,6 +173,24 @@ class ConfigTab(
                 server.stop()
             }
         }
+
+        fun applyAndRestartIfNeeded() {
+            if (!applyConfig()) return
+            if (config.enabled) {
+                server.stop()
+                server.start()
+            }
+        }
+
+        hostComboBox.addActionListener { applyAndRestartIfNeeded() }
+
+        portField.addFocusListener(object : java.awt.event.FocusAdapter() {
+            override fun focusLost(e: java.awt.event.FocusEvent?) {
+                applyAndRestartIfNeeded()
+            }
+        })
+        portField.addActionListener { applyAndRestartIfNeeded() }
+
         configEditingCheckbox.addActionListener { config.configEditingTooling = configEditingCheckbox.isSelected }
         httpApprovalCheckbox.addActionListener { config.requireHttpRequestApproval = httpApprovalCheckbox.isSelected }
         historyApprovalCheckbox.addActionListener { config.requireHistoryAccessApproval = historyApprovalCheckbox.isSelected }
@@ -212,16 +230,6 @@ class ConfigTab(
             }
         }
 
-        val applyButton = JButton("Apply & Restart").apply {
-            addActionListener {
-                if (!applyConfig()) return@addActionListener
-                if (config.enabled) {
-                    server.stop()
-                    server.start()
-                }
-            }
-        }
-
         // ============================
         // Server group
         // ============================
@@ -255,10 +263,6 @@ class ConfigTab(
         serverGroup.add(JLabel("Port:"), gbc)
         gbc.gridx = 1; gbc.fill = GridBagConstraints.NONE; gbc.weightx = 1.0
         serverGroup.add(portField, gbc)
-
-        // Row 4: Apply button
-        gbc.gridx = 1; gbc.gridy = 4; gbc.fill = GridBagConstraints.NONE; gbc.weightx = 0.0
-        serverGroup.add(applyButton, gbc)
 
         // ============================
         // MCP Interception group
