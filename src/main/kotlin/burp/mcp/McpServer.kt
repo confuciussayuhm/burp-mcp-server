@@ -17,7 +17,7 @@ import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
-import io.modelcontextprotocol.kotlin.sdk.server.mcpStreamableHttp
+import io.modelcontextprotocol.kotlin.sdk.server.mcpStatelessStreamableHttp
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -72,7 +72,7 @@ class McpServer(
                         maxAgeInSeconds = 3600
                     }
 
-                    mcpStreamableHttp {
+                    mcpStatelessStreamableHttp {
                         Server(
                             serverInfo = Implementation("burp-mcp-server", "1.0.0"),
                             options = ServerOptions(
