@@ -22,12 +22,77 @@ import javax.swing.*
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
+private val compactJson = Json { explicitNulls = false }
+
 private fun truncateIfNeeded(serialized: String): String {
     return if (serialized.length > 5000) {
         serialized.substring(0, 5000) + "... (truncated)"
     } else {
         serialized
     }
+}
+
+private fun filterProxyHistory(
+    items: List<burp.api.montoya.proxy.ProxyHttpRequestResponse>,
+    statusCodes: String?,
+    methods: String?,
+    host: String?,
+    mimeTypes: String?,
+    inScopeOnly: Boolean
+): Sequence<burp.api.montoya.proxy.ProxyHttpRequestResponse> {
+    var seq = items.asSequence()
+
+    if (inScopeOnly) {
+        seq = seq.filter { try { it.request()?.isInScope == true } catch (_: Exception) { false } }
+    }
+
+    if (!methods.isNullOrBlank()) {
+        val methodList = methods.split(",").map { it.trim().uppercase() }
+        seq = seq.filter { item ->
+            try { item.request()?.method()?.uppercase() in methodList } catch (_: Exception) { false }
+        }
+    }
+
+    if (!host.isNullOrBlank()) {
+        seq = seq.filter { item ->
+            try {
+                val itemHost = item.httpService()?.host() ?: return@filter false
+                if (host.startsWith("*.")) {
+                    val domain = host.substring(2)
+                    itemHost.equals(domain, ignoreCase = true) || itemHost.endsWith(".$domain", ignoreCase = true)
+                } else {
+                    itemHost.equals(host, ignoreCase = true)
+                }
+            } catch (_: Exception) { false }
+        }
+    }
+
+    if (!statusCodes.isNullOrBlank()) {
+        val filters = statusCodes.split(",").map { it.trim().lowercase() }
+        seq = seq.filter { item ->
+            try {
+                val code = item.response()?.statusCode()?.toInt() ?: return@filter false
+                filters.any { f ->
+                    when {
+                        f.endsWith("xx") -> {
+                            val prefix = f.dropLast(2).toIntOrNull() ?: return@any false
+                            code / 100 == prefix
+                        }
+                        else -> f.toIntOrNull() == code
+                    }
+                }
+            } catch (_: Exception) { false }
+        }
+    }
+
+    if (!mimeTypes.isNullOrBlank()) {
+        val typeList = mimeTypes.split(",").map { it.trim().uppercase() }
+        seq = seq.filter { item ->
+            try { item.mimeType()?.name?.uppercase() in typeList } catch (_: Exception) { false }
+        }
+    }
+
+    return seq
 }
 
 private suspend fun checkHttpRequestPermission(
@@ -271,20 +336,56 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig, interceptManager: I
         "Editor text has been set"
     }
 
+    val httpHistoryDescription = "Retrieves items from the proxy HTTP history with structured output. " +
+        "Set includeRequestBody/includeResponseBody to false to exclude bodies and save tokens (default: true). " +
+        "Set includeHeaders to false for a compact metadata-only view (default: true). " +
+        "Filter by statusCodes (e.g., '200', '2xx', '4xx,5xx'), methods (e.g., 'GET,POST'), " +
+        "host (e.g., 'example.com' or '*.example.com'), mimeTypes (e.g., 'HTML,JSON,SCRIPT,XML'), " +
+        "and inScopeOnly (true to limit to in-scope items). " +
+        "Each item includes modification flags: requestModified (original client request differs from what was sent to server), " +
+        "responseModified (original server response differs from what was returned to client), " +
+        "edited (user manually edited in proxy UI). " +
+        "Use get_proxy_http_history_item to retrieve full details including all modified versions."
+
     // 18. get_proxy_http_history (paginated)
-    mcpPaginatedTool<GetProxyHttpHistory>("Displays items within the proxy HTTP history") {
+    mcpPaginatedTool<GetProxyHttpHistory>(httpHistoryDescription) {
         val allowed = runBlocking { checkHistoryPermission("HTTP", config, api) }
         if (!allowed) return@mcpPaginatedTool sequenceOf("HTTP history access denied by Burp Suite")
-        api.proxy().history().asSequence().map { truncateIfNeeded(Json.encodeToString(it.toSerializableForm())) }
+        filterProxyHistory(api.proxy().history(), statusCodes, methods, host, mimeTypes, inScopeOnly == true)
+            .map { truncateIfNeeded(compactJson.encodeToString(it.toSerializableProxyForm(
+                includeRequestBody != false, includeResponseBody != false, includeHeaders != false
+            ))) }
     }
 
     // 19. get_proxy_http_history_regex (paginated)
-    mcpPaginatedTool<GetProxyHttpHistoryRegex>("Displays items matching a specified regex within the proxy HTTP history") {
+    mcpPaginatedTool<GetProxyHttpHistoryRegex>(
+        "Searches proxy HTTP history by regex on full request/response content, with the same filtering and output options as get_proxy_http_history."
+    ) {
         val allowed = runBlocking { checkHistoryPermission("HTTP", config, api) }
         if (!allowed) return@mcpPaginatedTool sequenceOf("HTTP history access denied by Burp Suite")
         val compiledRegex = Pattern.compile(regex)
-        api.proxy().history { it.contains(compiledRegex) }.asSequence()
-            .map { truncateIfNeeded(Json.encodeToString(it.toSerializableForm())) }
+        filterProxyHistory(api.proxy().history { it.contains(compiledRegex) }, statusCodes, methods, host, mimeTypes, inScopeOnly == true)
+            .map { truncateIfNeeded(compactJson.encodeToString(it.toSerializableProxyForm(
+                includeRequestBody != false, includeResponseBody != false, includeHeaders != false
+            ))) }
+    }
+
+    // 19b. get_proxy_http_history_item (single item by ID)
+    mcpTool<GetProxyHttpHistoryItem>(
+        "Retrieves a single proxy HTTP history item by its ID with full headers and body. " +
+        "When requestModified is true, includes finalRequestHeaders/finalRequestBody (the request actually sent to the server after Burp modifications). " +
+        "When responseModified is true, includes originalResponseHeaders/originalResponseBody (the original server response before Burp modifications). " +
+        "The base request/response fields always show: request = original from client, response = final delivered to client. " +
+        "Use get_proxy_http_history first to browse items and find IDs."
+    ) {
+        val allowed = runBlocking { checkHistoryPermission("HTTP", config, api) }
+        if (!allowed) return@mcpTool "HTTP history access denied by Burp Suite"
+        val item = api.proxy().history().firstOrNull { it.id() == id }
+            ?: return@mcpTool "No history item found with ID: $id"
+        compactJson.encodeToString(item.toSerializableProxyForm(
+            includeRequestBody = true, includeResponseBody = true, includeHeaders = true,
+            includeModifiedVersions = true
+        ))
     }
 
     // 20. get_proxy_websocket_history (paginated)
