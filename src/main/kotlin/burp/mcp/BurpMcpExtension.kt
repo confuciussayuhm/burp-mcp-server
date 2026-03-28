@@ -23,6 +23,7 @@ class BurpMcpExtension : BurpExtension {
         tabbedPane.addTab("Intercept", interceptTab.component)
 
         api.userInterface().registerSuiteTab("MCP", tabbedPane)
+        api.userInterface().registerContextMenuItemsProvider(AutoApproveContextMenu(config))
 
         if (config.enabled) {
             server.start()

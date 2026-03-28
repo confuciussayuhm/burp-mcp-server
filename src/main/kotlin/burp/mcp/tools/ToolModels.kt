@@ -87,10 +87,36 @@ data class SetActiveEditorContents(val text: String)
 data class GetScannerIssues(override val count: Int, override val offset: Int) : Paginated
 
 @Serializable
-data class GetProxyHttpHistory(override val count: Int, override val offset: Int) : Paginated
+data class GetProxyHttpHistory(
+    override val count: Int,
+    override val offset: Int,
+    val includeRequestBody: Boolean? = null,
+    val includeResponseBody: Boolean? = null,
+    val includeHeaders: Boolean? = null,
+    val statusCodes: String? = null,
+    val methods: String? = null,
+    val host: String? = null,
+    val mimeTypes: String? = null,
+    val inScopeOnly: Boolean? = null
+) : Paginated
 
 @Serializable
-data class GetProxyHttpHistoryRegex(val regex: String, override val count: Int, override val offset: Int) : Paginated
+data class GetProxyHttpHistoryRegex(
+    val regex: String,
+    override val count: Int,
+    override val offset: Int,
+    val includeRequestBody: Boolean? = null,
+    val includeResponseBody: Boolean? = null,
+    val includeHeaders: Boolean? = null,
+    val statusCodes: String? = null,
+    val methods: String? = null,
+    val host: String? = null,
+    val mimeTypes: String? = null,
+    val inScopeOnly: Boolean? = null
+) : Paginated
+
+@Serializable
+data class GetProxyHttpHistoryItem(val id: Int)
 
 @Serializable
 data class GetProxyWebsocketHistory(override val count: Int, override val offset: Int) : Paginated

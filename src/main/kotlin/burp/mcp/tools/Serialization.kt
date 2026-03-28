@@ -52,6 +52,64 @@ fun ProxyHttpRequestResponse.toSerializableForm(): SerializableHttpRequestRespon
     )
 }
 
+private fun headersToString(msg: burp.api.montoya.http.message.HttpMessage): String? {
+    return try { msg.headers().joinToString("\r\n") { "${it.name()}: ${it.value()}" } } catch (_: Exception) { null }
+}
+
+private fun bodyToStringOrNull(msg: burp.api.montoya.http.message.HttpMessage): String? {
+    return try { msg.bodyToString().ifEmpty { null } } catch (_: Exception) { null }
+}
+
+fun ProxyHttpRequestResponse.toSerializableProxyForm(
+    includeRequestBody: Boolean = true,
+    includeResponseBody: Boolean = true,
+    includeHeaders: Boolean = true,
+    includeModifiedVersions: Boolean = false
+): SerializableProxyHttpItem {
+    val req = request()
+    val finalReq = try { finalRequest() } catch (_: Exception) { null }
+    val resp = response()
+    val origResp = try { originalResponse() } catch (_: Exception) { null }
+    val service = try { httpService() } catch (_: Exception) { null }
+
+    val reqModified = try {
+        req != null && finalReq != null && req.toString() != finalReq.toString()
+    } catch (_: Exception) { false }
+
+    val respModified = try {
+        resp != null && origResp != null && resp.toString() != origResp.toString()
+    } catch (_: Exception) { false }
+
+    val wasEdited = try { edited() } catch (_: Exception) { false }
+
+    return SerializableProxyHttpItem(
+        id = id(),
+        host = service?.host(),
+        port = service?.port(),
+        secure = service?.secure(),
+        method = try { req?.method() } catch (_: Exception) { null },
+        url = try { req?.url() } catch (_: Exception) { null },
+        statusCode = try { resp?.statusCode()?.toInt() } catch (_: Exception) { null },
+        mimeType = try { mimeType()?.name } catch (_: Exception) { null },
+        requestHeaders = if (includeHeaders && req != null) headersToString(req) else null,
+        requestBody = if (includeRequestBody && req != null) bodyToStringOrNull(req) else null,
+        responseHeaders = if (includeHeaders && resp != null) headersToString(resp) else null,
+        responseBody = if (includeResponseBody && resp != null) bodyToStringOrNull(resp) else null,
+        requestModified = reqModified,
+        responseModified = respModified,
+        edited = wasEdited,
+        finalRequestHeaders = if (includeModifiedVersions && reqModified && includeHeaders && finalReq != null)
+            headersToString(finalReq) else null,
+        finalRequestBody = if (includeModifiedVersions && reqModified && includeRequestBody && finalReq != null)
+            bodyToStringOrNull(finalReq) else null,
+        originalResponseHeaders = if (includeModifiedVersions && respModified && includeHeaders && origResp != null)
+            headersToString(origResp) else null,
+        originalResponseBody = if (includeModifiedVersions && respModified && includeResponseBody && origResp != null)
+            bodyToStringOrNull(origResp) else null,
+        notes = annotations()?.notes()
+    )
+}
+
 fun ProxyWebSocketMessage.toSerializableForm(): SerializableWebSocketMessage {
     return SerializableWebSocketMessage(
         payload = payload()?.toString() ?: "<no payload>",
@@ -127,6 +185,34 @@ enum class AuditIssueConfidence {
 data class SerializableHttpRequestResponse(
     val request: String?,
     val response: String?,
+    val notes: String?
+)
+
+@Serializable
+data class SerializableProxyHttpItem(
+    val id: Int,
+    val host: String?,
+    val port: Int?,
+    val secure: Boolean?,
+    val method: String?,
+    val url: String?,
+    val statusCode: Int?,
+    val mimeType: String?,
+    // request() = original request from client; response() = final response delivered to client
+    val requestHeaders: String?,
+    val requestBody: String?,
+    val responseHeaders: String?,
+    val responseBody: String?,
+    // Modification flags — true means the request/response was changed between proxy stages
+    val requestModified: Boolean,
+    val responseModified: Boolean,
+    val edited: Boolean,
+    // Only present when requestModified=true: the final request actually sent to the server
+    val finalRequestHeaders: String? = null,
+    val finalRequestBody: String? = null,
+    // Only present when responseModified=true: the original response received from the server
+    val originalResponseHeaders: String? = null,
+    val originalResponseBody: String? = null,
     val notes: String?
 )
 
