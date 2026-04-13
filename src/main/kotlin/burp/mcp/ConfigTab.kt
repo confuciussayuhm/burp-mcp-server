@@ -75,6 +75,9 @@ class ConfigTab(
         val configEditingCheckbox = JCheckBox("Enable tools that can edit your config", config.configEditingTooling)
         val httpApprovalCheckbox = JCheckBox("Require HTTP request approval", config.requireHttpRequestApproval)
         val historyApprovalCheckbox = JCheckBox("Require history access approval", config.requireHistoryAccessApproval)
+        val useBurpScopeCheckbox = JCheckBox("Use Burp Target Scope to auto-approve", config.useBurpScopeForApproval).apply {
+            toolTipText = "Targets in Burp's Target Scope are auto-approved without queueing a pending approval."
+        }
         val alwaysAllowHttpHistoryCheckbox = JCheckBox("Always allow HTTP history access", config.alwaysAllowHttpHistory)
         val alwaysAllowWsHistoryCheckbox = JCheckBox("Always allow WebSocket history access", config.alwaysAllowWebSocketHistory)
 
@@ -99,16 +102,6 @@ class ConfigTab(
         })
 
         val portField = JTextField(config.port.toString(), 6)
-
-        val autoApproveListModel = DefaultListModel<String>().apply {
-            config.getAutoApproveTargetsList().forEach { addElement(it) }
-        }
-        val autoApproveList = JList(autoApproveListModel).apply {
-            selectionMode = ListSelectionModel.MULTIPLE_INTERVAL_SELECTION
-            visibleRowCount = 5
-        }
-        val addTargetButton = JButton("Add...")
-        val removeTargetButton = JButton("Remove")
 
         val infoArea = JTextArea().apply {
             isEditable = false
@@ -194,39 +187,14 @@ class ConfigTab(
         configEditingCheckbox.addActionListener { config.configEditingTooling = configEditingCheckbox.isSelected }
         httpApprovalCheckbox.addActionListener { config.requireHttpRequestApproval = httpApprovalCheckbox.isSelected }
         historyApprovalCheckbox.addActionListener { config.requireHistoryAccessApproval = historyApprovalCheckbox.isSelected }
+        useBurpScopeCheckbox.addActionListener { config.useBurpScopeForApproval = useBurpScopeCheckbox.isSelected }
         alwaysAllowHttpHistoryCheckbox.addActionListener { config.alwaysAllowHttpHistory = alwaysAllowHttpHistoryCheckbox.isSelected }
         alwaysAllowWsHistoryCheckbox.addActionListener { config.alwaysAllowWebSocketHistory = alwaysAllowWsHistoryCheckbox.isSelected }
-
-        config.onAutoApproveTargetsChanged = {
-            SwingUtilities.invokeLater {
-                autoApproveListModel.clear()
-                config.getAutoApproveTargetsList().forEach { autoApproveListModel.addElement(it) }
-            }
-        }
 
         config.onAlwaysAllowHistoryChanged = {
             SwingUtilities.invokeLater {
                 alwaysAllowHttpHistoryCheckbox.isSelected = config.alwaysAllowHttpHistory
                 alwaysAllowWsHistoryCheckbox.isSelected = config.alwaysAllowWebSocketHistory
-            }
-        }
-
-        addTargetButton.addActionListener {
-            val input = JOptionPane.showInputDialog(
-                null,
-                "Enter host to auto-approve (e.g. example.com, *.internal.corp):",
-                "Add Auto-approve Target",
-                JOptionPane.PLAIN_MESSAGE
-            )
-            if (input != null && input.trim().isNotEmpty()) {
-                config.addAutoApproveTarget(input.trim())
-            }
-        }
-
-        removeTargetButton.addActionListener {
-            val selected = autoApproveList.selectedValuesList
-            if (selected.isNotEmpty()) {
-                config.removeAutoApproveTargets(selected)
             }
         }
 
@@ -348,6 +316,8 @@ class ConfigTab(
         securityGroup.add(httpApprovalCheckbox, gbc)
         gbc.gridy = ++secRow
         securityGroup.add(historyApprovalCheckbox, gbc)
+        gbc.gridy = ++secRow
+        securityGroup.add(useBurpScopeCheckbox, gbc)
 
         // Sub-heading: History Access Approvals
         gbc.gridy = ++secRow; gbc.insets = Insets(12, 8, 2, 8)
@@ -361,30 +331,12 @@ class ConfigTab(
         gbc.gridy = ++secRow
         securityGroup.add(alwaysAllowWsHistoryCheckbox, gbc)
 
-        // Sub-heading: Auto-approved Targets
-        gbc.gridy = ++secRow; gbc.insets = Insets(12, 8, 2, 8)
-        securityGroup.add(JLabel("Auto-approved Targets:").apply {
-            font = font.deriveFont(Font.BOLD)
+        // Sub-heading: Auto-approved Targets pointer
+        gbc.gridy = ++secRow; gbc.insets = Insets(12, 8, 4, 8)
+        securityGroup.add(JLabel("Manage auto-approved targets in the Approvals tab.").apply {
+            font = font.deriveFont(Font.ITALIC)
         }, gbc)
         gbc.insets = Insets(4, 8, 4, 8)
-        gbc.gridwidth = 1
-
-        // List + buttons
-        gbc.gridx = 0; gbc.gridy = ++secRow; gbc.gridwidth = 1
-        gbc.fill = GridBagConstraints.BOTH; gbc.weightx = 1.0; gbc.weighty = 1.0
-        securityGroup.add(JScrollPane(autoApproveList).apply {
-            preferredSize = Dimension(300, 100)
-        }, gbc)
-
-        val buttonPanel = JPanel().apply {
-            layout = BoxLayout(this, BoxLayout.Y_AXIS)
-            add(addTargetButton)
-            add(Box.createVerticalStrut(4))
-            add(removeTargetButton)
-        }
-        gbc.gridx = 1; gbc.fill = GridBagConstraints.NONE; gbc.weightx = 0.0; gbc.weighty = 0.0
-        gbc.anchor = GridBagConstraints.NORTHWEST
-        securityGroup.add(buttonPanel, gbc)
 
         // ============================
         // Assembly
