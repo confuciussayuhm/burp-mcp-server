@@ -45,7 +45,9 @@
       "Bash(find W:/temp/burp-mcp-server -path */burp/api/montoya* -name *.class)",
       "Bash(find W:/temp/burp-mcp-server/.gradle -name montoya-api* -o -name montoya*jar)",
       "Bash(./gradlew build:*)",
-      "Bash(find /w/temp/burp_files -type f -name *Proxy* -o -name *History* -o -name *HttpRequest* -o -name *HttpResponse* -o -name *HttpMessage* -o -name *HttpHeader* -o -name *Annotations*)"
+      "Bash(find /w/temp/burp_files -type f -name *Proxy* -o -name *History* -o -name *HttpRequest* -o -name *HttpResponse* -o -name *HttpMessage* -o -name *HttpHeader* -o -name *Annotations*)",
+      "mcp__plugin_claude-mem_mcp-search__smart_outline",
+      "mcp__plugin_claude-mem_mcp-search__get_observations"
     ]
   }
 }

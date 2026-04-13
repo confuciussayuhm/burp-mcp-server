@@ -9,18 +9,18 @@ import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.message.HttpHeader
 import burp.api.montoya.http.message.requests.HttpRequest
 import burp.mcp.McpConfig
+import burp.mcp.approval.ApprovalDecision
+import burp.mcp.approval.ApprovalKind
+import burp.mcp.approval.PendingApprovalManager
 import burp.mcp.intercept.InterceptManager
 import burp.mcp.intercept.MessageResolution
 import burp.mcp.intercept.PendingRequest
 import burp.mcp.intercept.PendingResponse
 import io.modelcontextprotocol.kotlin.sdk.server.Server
-import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import java.awt.KeyboardFocusManager
 import java.util.regex.Pattern
-import javax.swing.*
-import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
+import javax.swing.JTextArea
 
 private val compactJson = Json { explicitNulls = false }
 
@@ -95,12 +95,8 @@ private fun filterProxyHistory(
     return seq
 }
 
-private suspend fun checkHttpRequestPermission(
-    hostname: String, port: Int, config: McpConfig, content: String, api: MontoyaApi
-): Boolean {
-    if (!config.requireHttpRequestApproval) return true
-
-    val autoApproved = config.getAutoApproveTargetsList().any { approved ->
+private fun isAutoApprovedTarget(hostname: String, port: Int, config: McpConfig): Boolean {
+    return config.getAutoApproveTargetsList().any { approved ->
         when {
             approved.equals("$hostname:$port", ignoreCase = true) -> true
             approved.equals(hostname, ignoreCase = true) -> true
@@ -111,60 +107,85 @@ private suspend fun checkHttpRequestPermission(
             else -> false
         }
     }
-    if (autoApproved) return true
-
-    return suspendCoroutine { continuation ->
-        SwingUtilities.invokeLater {
-            val message = "An MCP client is requesting to send an HTTP request to:\n\nTarget: $hostname:$port\n"
-            val options = arrayOf("Allow Once", "Always Allow Host", "Always Allow Host:Port", "Deny")
-            val result = JOptionPane.showOptionDialog(
-                null, message, "MCP HTTP Request Approval",
-                JOptionPane.DEFAULT_OPTION, JOptionPane.QUESTION_MESSAGE, null, options, options[0]
-            )
-            when (result) {
-                0 -> continuation.resume(true)
-                1 -> { config.addAutoApproveTarget(hostname); continuation.resume(true) }
-                2 -> { config.addAutoApproveTarget("$hostname:$port"); continuation.resume(true) }
-                else -> continuation.resume(false)
-            }
-        }
-    }
 }
 
-private suspend fun checkHistoryPermission(
-    historyType: String, config: McpConfig, api: MontoyaApi
-): Boolean {
-    if (!config.requireHistoryAccessApproval) return true
+private fun isInBurpScope(hostname: String, port: Int, secure: Boolean, api: MontoyaApi): Boolean {
+    val primaryScheme = if (secure) "https" else "http"
+    val otherScheme = if (secure) "http" else "https"
+    val candidates = listOf(
+        "$primaryScheme://$hostname:$port/",
+        "$primaryScheme://$hostname/",
+        "$otherScheme://$hostname:$port/",
+        "$otherScheme://$hostname/"
+    )
+    for (url in candidates) {
+        try {
+            if (api.scope().isInScope(url)) {
+                api.logging().logToOutput("MCP scope auto-approve matched: $url")
+                return true
+            }
+        } catch (e: Exception) {
+            api.logging().logToOutput("MCP scope check error for $url: ${e.message}")
+        }
+    }
+    return false
+}
+
+private fun checkHttpRequestPermission(
+    hostname: String,
+    port: Int,
+    secure: Boolean,
+    config: McpConfig,
+    preview: String,
+    api: MontoyaApi,
+    approvals: PendingApprovalManager
+): ApprovalDecision {
+    if (!config.requireHttpRequestApproval) return ApprovalDecision.Allow
+    if (isAutoApprovedTarget(hostname, port, config)) return ApprovalDecision.Allow
+    if (config.useBurpScopeForApproval && isInBurpScope(hostname, port, secure, api)) {
+        return ApprovalDecision.Allow
+    }
+
+    val pending = approvals.enqueue(ApprovalKind.HTTP_REQUEST, hostname, port, preview)
+    val idStr = pending?.id ?: "(queue full)"
+    val reason = buildString {
+        append("Target `$hostname:$port` is not approved for MCP access. ")
+        append("A pending approval has been queued (id $idStr). ")
+        append("Approve it by: (1) opening Burp → MCP → Approvals tab and clicking Approve, ")
+        append("(2) right-clicking the host in Proxy History → \"MCP: Auto-approve target\", ")
+        append("or (3) adding `$hostname` (or `*.$hostname`) under MCP → Settings → Auto-approved Targets. ")
+        append("Then retry the tool call.")
+    }
+    return ApprovalDecision.Deny(reason, pending?.id)
+}
+
+private fun checkHistoryPermission(
+    historyType: String,
+    config: McpConfig,
+    approvals: PendingApprovalManager
+): ApprovalDecision {
+    if (!config.requireHistoryAccessApproval) return ApprovalDecision.Allow
 
     val alwaysAllowed = when (historyType) {
         "HTTP" -> config.alwaysAllowHttpHistory
         "WebSocket" -> config.alwaysAllowWebSocketHistory
         else -> false
     }
-    if (alwaysAllowed) return true
+    if (alwaysAllowed) return ApprovalDecision.Allow
 
-    return suspendCoroutine { continuation ->
-        SwingUtilities.invokeLater {
-            val message = "An MCP client is requesting access to your Burp Suite $historyType history.\n\n" +
-                "This may include sensitive data from previous web sessions.\n"
-            val options = arrayOf("Allow Once", "Always Allow $historyType History", "Deny")
-            val result = JOptionPane.showOptionDialog(
-                null, message, "MCP History Access",
-                JOptionPane.DEFAULT_OPTION, JOptionPane.QUESTION_MESSAGE, null, options, options[0]
-            )
-            when (result) {
-                0 -> continuation.resume(true)
-                1 -> {
-                    when (historyType) {
-                        "HTTP" -> config.alwaysAllowHttpHistory = true
-                        "WebSocket" -> config.alwaysAllowWebSocketHistory = true
-                    }
-                    continuation.resume(true)
-                }
-                else -> continuation.resume(false)
-            }
-        }
+    val kind = when (historyType) {
+        "HTTP" -> ApprovalKind.HTTP_HISTORY
+        "WebSocket" -> ApprovalKind.WEBSOCKET_HISTORY
+        else -> ApprovalKind.HTTP_HISTORY
     }
+    val preview = "An MCP client is requesting access to your Burp Suite $historyType history. " +
+        "This may include sensitive data from previous web sessions."
+    val pending = approvals.enqueue(kind, null, null, preview)
+    val idStr = pending?.id ?: "(queue full)"
+    val reason = "Access to $historyType history is not approved for MCP. " +
+        "A pending approval has been queued (id $idStr). " +
+        "Approve it in Burp → MCP → Approvals to set 'Always allow $historyType history', then retry."
+    return ApprovalDecision.Deny(reason, pending?.id)
 }
 
 private fun getActiveEditor(api: MontoyaApi): JTextArea? {
@@ -175,16 +196,25 @@ private fun getActiveEditor(api: MontoyaApi): JTextArea? {
     return if (isInBurpWindow && permanentFocusOwner is JTextArea) permanentFocusOwner else null
 }
 
-fun Server.registerTools(api: MontoyaApi, config: McpConfig, interceptManager: InterceptManager) {
+fun Server.registerTools(
+    api: MontoyaApi,
+    config: McpConfig,
+    interceptManager: InterceptManager,
+    approvals: PendingApprovalManager
+) {
 
     // 1. send_http1_request
     mcpTool<SendHttp1Request>("Issues an HTTP/1.1 request and returns the response.") {
-        val allowed = runBlocking {
-            checkHttpRequestPermission(targetHostname, targetPort, config, content, api)
-        }
-        if (!allowed) {
-            api.logging().logToOutput("MCP HTTP request denied: $targetHostname:$targetPort")
-            return@mcpTool "Send HTTP request denied by Burp Suite"
+        when (val decision = checkHttpRequestPermission(
+            targetHostname, targetPort, usesHttps, config, content, api, approvals
+        )) {
+            ApprovalDecision.Allow -> { /* fall through */ }
+            is ApprovalDecision.Deny -> {
+                api.logging().logToOutput(
+                    "MCP HTTP request pending approval: $targetHostname:$targetPort (${decision.pendingId})"
+                )
+                return@mcpTool decision.reason
+            }
         }
 
         api.logging().logToOutput("MCP HTTP/1.1 request: $targetHostname:$targetPort")
@@ -205,12 +235,16 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig, interceptManager: I
             if (requestBody.isNotBlank()) { appendLine(); append(requestBody) }
         }
 
-        val allowed = runBlocking {
-            checkHttpRequestPermission(targetHostname, targetPort, config, http2RequestDisplay, api)
-        }
-        if (!allowed) {
-            api.logging().logToOutput("MCP HTTP request denied: $targetHostname:$targetPort")
-            return@mcpTool "Send HTTP request denied by Burp Suite"
+        when (val decision = checkHttpRequestPermission(
+            targetHostname, targetPort, usesHttps, config, http2RequestDisplay, api, approvals
+        )) {
+            ApprovalDecision.Allow -> { /* fall through */ }
+            is ApprovalDecision.Deny -> {
+                api.logging().logToOutput(
+                    "MCP HTTP request pending approval: $targetHostname:$targetPort (${decision.pendingId})"
+                )
+                return@mcpTool decision.reason
+            }
         }
 
         api.logging().logToOutput("MCP HTTP/2 request: $targetHostname:$targetPort")
@@ -349,8 +383,8 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig, interceptManager: I
 
     // 18. get_proxy_http_history (paginated)
     mcpPaginatedTool<GetProxyHttpHistory>(httpHistoryDescription) {
-        val allowed = runBlocking { checkHistoryPermission("HTTP", config, api) }
-        if (!allowed) return@mcpPaginatedTool sequenceOf("HTTP history access denied by Burp Suite")
+        val decision = checkHistoryPermission("HTTP", config, approvals)
+        if (decision is ApprovalDecision.Deny) return@mcpPaginatedTool sequenceOf(decision.reason)
         filterProxyHistory(api.proxy().history(), statusCodes, methods, host, mimeTypes, inScopeOnly == true)
             .map { truncateIfNeeded(compactJson.encodeToString(it.toSerializableProxyForm(
                 includeRequestBody != false, includeResponseBody != false, includeHeaders != false
@@ -361,8 +395,8 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig, interceptManager: I
     mcpPaginatedTool<GetProxyHttpHistoryRegex>(
         "Searches proxy HTTP history by regex on full request/response content, with the same filtering and output options as get_proxy_http_history."
     ) {
-        val allowed = runBlocking { checkHistoryPermission("HTTP", config, api) }
-        if (!allowed) return@mcpPaginatedTool sequenceOf("HTTP history access denied by Burp Suite")
+        val decision = checkHistoryPermission("HTTP", config, approvals)
+        if (decision is ApprovalDecision.Deny) return@mcpPaginatedTool sequenceOf(decision.reason)
         val compiledRegex = Pattern.compile(regex)
         filterProxyHistory(api.proxy().history { it.contains(compiledRegex) }, statusCodes, methods, host, mimeTypes, inScopeOnly == true)
             .map { truncateIfNeeded(compactJson.encodeToString(it.toSerializableProxyForm(
@@ -378,8 +412,8 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig, interceptManager: I
         "The base request/response fields always show: request = original from client, response = final delivered to client. " +
         "Use get_proxy_http_history first to browse items and find IDs."
     ) {
-        val allowed = runBlocking { checkHistoryPermission("HTTP", config, api) }
-        if (!allowed) return@mcpTool "HTTP history access denied by Burp Suite"
+        val decision = checkHistoryPermission("HTTP", config, approvals)
+        if (decision is ApprovalDecision.Deny) return@mcpTool decision.reason
         val item = api.proxy().history().firstOrNull { it.id() == id }
             ?: return@mcpTool "No history item found with ID: $id"
         compactJson.encodeToString(item.toSerializableProxyForm(
@@ -390,16 +424,16 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig, interceptManager: I
 
     // 20. get_proxy_websocket_history (paginated)
     mcpPaginatedTool<GetProxyWebsocketHistory>("Displays items within the proxy WebSocket history") {
-        val allowed = runBlocking { checkHistoryPermission("WebSocket", config, api) }
-        if (!allowed) return@mcpPaginatedTool sequenceOf("WebSocket history access denied by Burp Suite")
+        val decision = checkHistoryPermission("WebSocket", config, approvals)
+        if (decision is ApprovalDecision.Deny) return@mcpPaginatedTool sequenceOf(decision.reason)
         api.proxy().webSocketHistory().asSequence()
             .map { truncateIfNeeded(Json.encodeToString(it.toSerializableForm())) }
     }
 
     // 21. get_proxy_websocket_history_regex (paginated)
     mcpPaginatedTool<GetProxyWebsocketHistoryRegex>("Displays items matching a specified regex within the proxy WebSocket history") {
-        val allowed = runBlocking { checkHistoryPermission("WebSocket", config, api) }
-        if (!allowed) return@mcpPaginatedTool sequenceOf("WebSocket history access denied by Burp Suite")
+        val decision = checkHistoryPermission("WebSocket", config, approvals)
+        if (decision is ApprovalDecision.Deny) return@mcpPaginatedTool sequenceOf(decision.reason)
         val compiledRegex = Pattern.compile(regex)
         api.proxy().webSocketHistory { it.contains(compiledRegex) }.asSequence()
             .map { truncateIfNeeded(Json.encodeToString(it.toSerializableForm())) }

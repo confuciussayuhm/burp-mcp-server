@@ -1,6 +1,7 @@
 package burp.mcp
 
 import burp.api.montoya.MontoyaApi
+import burp.mcp.approval.PendingApprovalManager
 import burp.mcp.intercept.InterceptManager
 import burp.mcp.tools.registerTools
 import io.ktor.http.*
@@ -27,7 +28,8 @@ enum class ServerState { Stopped, Starting, Running, Stopping, Failed }
 class McpServer(
     private val api: MontoyaApi,
     private val config: McpConfig,
-    private val interceptManager: InterceptManager
+    private val interceptManager: InterceptManager,
+    private val approvals: PendingApprovalManager
 ) {
 
     private var server: EmbeddedServer<*, *>? = null
@@ -80,7 +82,7 @@ class McpServer(
                                     tools = ServerCapabilities.Tools(listChanged = false)
                                 )
                             )
-                        ).also { it.registerTools(api, config, interceptManager) }
+                        ).also { it.registerTools(api, config, interceptManager, approvals) }
                     }
 
                     routing {
