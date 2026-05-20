@@ -3,6 +3,7 @@ package burp.mcp.approval
 class PendingApprovalManager {
 
     val store = PendingApprovalStore()
+    val history = ApprovalHistory()
 
     private val listeners = mutableListOf<() -> Unit>()
 
@@ -44,9 +45,18 @@ class PendingApprovalManager {
         return removed
     }
 
+    fun resolve(id: String, resolution: HistoryResolution): PendingApproval? {
+        val removed = store.remove(id) ?: return null
+        history.record(removed, resolution)
+        fire()
+        return removed
+    }
+
     fun clearAll() {
-        if (store.size() == 0) return
+        val all = store.list()
+        if (all.isEmpty()) return
         store.clear()
+        all.forEach { history.record(it, HistoryResolution.CLEARED) }
         fire()
     }
 }

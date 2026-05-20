@@ -544,9 +544,11 @@ fun Server.registerTools(
 
     // 29. forward_intercepted_message
     mcpTool<ForwardInterceptedMessage>(
-        "Forwards an intercepted message, optionally with modified raw content. " +
-        "If modifiedRaw is provided, the modified content replaces the original request or response. " +
-        "If not provided, the original message is forwarded unchanged."
+        "Forwards an intercepted message, optionally with modifications. " +
+        "Provide either modifiedRaw (a complete replacement raw HTTP message) OR replacements " +
+        "(a list of {find, replace} pairs applied in order to the original raw message). Use replacements " +
+        "for small targeted edits to large bodies (e.g. tampering a single field in a multi-megabyte JSON " +
+        "request) so you do not need to reproduce the whole message. Omit both to forward unchanged."
     ) {
         val message = interceptManager.store.getMessage(messageId)
             ?: return@mcpTool "No pending message found with ID: $messageId"
@@ -555,10 +557,43 @@ fun Server.registerTools(
             return@mcpTool "Error: modifiedRaw cannot be blank. Omit it to forward unchanged, or provide valid content."
         }
 
+        if (modifiedRaw != null && replacements != null) {
+            return@mcpTool "Error: provide either modifiedRaw or replacements, not both."
+        }
+
+        val effectiveRaw: String? = if (replacements != null) {
+            if (replacements.isEmpty()) {
+                return@mcpTool "Error: replacements list is empty. Omit the parameter to forward unchanged."
+            }
+            val originalRaw = when (message) {
+                is PendingRequest -> message.rawRequest
+                is PendingResponse -> message.rawResponse
+            }
+            var working = originalRaw
+            for ((index, r) in replacements.withIndex()) {
+                if (r.find.isEmpty()) {
+                    return@mcpTool "Error: replacement[$index].find is empty."
+                }
+                if (!working.contains(r.find)) {
+                    val preview = r.find.take(80).replace("\n", "\\n")
+                    return@mcpTool "Error: replacement[$index].find not present in the current message: \"$preview\""
+                }
+                working = working.replace(r.find, r.replace)
+            }
+            working
+        } else {
+            modifiedRaw
+        }
+
         interceptManager.store.removeMessage(messageId)
-        message.future.complete(MessageResolution.Forward(modifiedRaw))
-        api.logging().logToOutput("MCP forwarded message $messageId${if (modifiedRaw != null) " (modified)" else ""}")
-        "Message $messageId has been forwarded${if (modifiedRaw != null) " with modifications" else ""}"
+        message.future.complete(MessageResolution.Forward(effectiveRaw))
+        val mode = when {
+            replacements != null -> " (${replacements.size} replacement(s))"
+            modifiedRaw != null -> " (modified)"
+            else -> ""
+        }
+        api.logging().logToOutput("MCP forwarded message $messageId$mode")
+        "Message $messageId has been forwarded${if (effectiveRaw != null) " with modifications" else ""}"
     }
 
     // 30. drop_intercepted_message

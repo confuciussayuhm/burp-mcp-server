@@ -43,7 +43,16 @@ class InterceptManager(private val api: MontoyaApi) {
     }
 
     companion object {
-        const val TIMEOUT_SECONDS = 120L
+        /**
+         * Maximum time an intercepted message is held waiting for a client decision before it is
+         * auto-forwarded. Set generously (10 minutes) so the MCP client can compose a `replacements`
+         * or `modifiedRaw` payload without the queue evicting the message under it. The browser's
+         * own axios timeout is typically much shorter (e.g. 90 seconds); in that case the client
+         * will give up on the response while the request is still held, but the eventual modified
+         * forward still reaches the server and the response is captured in Burp's history for
+         * analysis. This matches the "tamper, observe server response" workflow the MCP is for.
+         */
+        const val TIMEOUT_SECONDS = 600L
     }
 
     fun register() {
@@ -113,7 +122,10 @@ class InterceptManager(private val api: MontoyaApi) {
             when (val resolution = future.get(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                 is MessageResolution.Forward -> {
                     val request = if (resolution.modifiedRaw != null) {
-                        HttpRequest.httpRequest(interceptedRequest.httpService(), resolution.modifiedRaw)
+                        HttpRequest.httpRequest(
+                            interceptedRequest.httpService(),
+                            normalizeLineEndings(resolution.modifiedRaw)
+                        )
                     } else {
                         interceptedRequest
                     }
@@ -172,7 +184,7 @@ class InterceptManager(private val api: MontoyaApi) {
             when (val resolution = future.get(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                 is MessageResolution.Forward -> {
                     val response = if (resolution.modifiedRaw != null) {
-                        HttpResponse.httpResponse(resolution.modifiedRaw)
+                        HttpResponse.httpResponse(normalizeLineEndings(resolution.modifiedRaw))
                     } else {
                         interceptedResponse
                     }
@@ -196,4 +208,16 @@ class InterceptManager(private val api: MontoyaApi) {
     private fun handleResponseToBeSent(interceptedResponse: InterceptedResponse): ProxyResponseToBeSentAction {
         return ProxyResponseToBeSentAction.continueWith(interceptedResponse)
     }
+
+    /**
+     * Normalizes line endings in a raw HTTP message to CRLF.
+     *
+     * MCP clients typically supply `modifiedRaw` with bare LF line endings. Burp's
+     * HttpRequest/HttpResponse parser expects CRLF — in particular a CRLFCRLF header/body
+     * separator. A bare-LF message parses with no blank line terminating the header block,
+     * producing a malformed request that upstream WAFs reject. Collapse any CR / CRLF / LF
+     * mix to LF first, then expand uniformly to CRLF so the message is always well-formed.
+     */
+    private fun normalizeLineEndings(raw: String): String =
+        raw.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
 }
