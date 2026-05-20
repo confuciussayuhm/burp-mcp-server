@@ -19,24 +19,31 @@ class BurpMcpExtension : BurpExtension {
         val approvals = PendingApprovalManager()
 
         val server = McpServer(api, config, interceptManager, approvals)
-        val tab = ConfigTab(api, config, server, interceptManager)
+
+        val tabbedPane = JTabbedPane()
+        val serverTab = ServerTab(api, config, server, interceptManager, approvals)
         val interceptTab = InterceptTab(api, interceptManager)
-        val approvalsTab = ApprovalsTab(api, config, approvals)
 
-        val tabbedPane = tab.component as JTabbedPane
+        tabbedPane.addTab("Server", serverTab.component)
+        val interceptIndex = tabbedPane.tabCount
         tabbedPane.addTab("Intercept", interceptTab.component)
-        val approvalsIndex = tabbedPane.tabCount
-        tabbedPane.addTab("Approvals", approvalsTab.component)
 
-        fun updateApprovalsTitle() {
-            val count = approvals.store.size()
-            tabbedPane.setTitleAt(approvalsIndex, if (count > 0) "Approvals ($count)" else "Approvals")
+        fun setBadge(index: Int, base: String, count: Int) {
+            tabbedPane.setTitleAt(index, if (count > 0) "$base ($count)" else base)
         }
-        val approvalsTitleListener: () -> Unit = {
-            SwingUtilities.invokeLater { updateApprovalsTitle() }
+
+        // Server tab badge reflects pending approvals (the surface that handles them).
+        val approvalsBadgeListener: () -> Unit = {
+            SwingUtilities.invokeLater { setBadge(0, "Server", approvals.store.size()) }
         }
-        approvals.addListener(approvalsTitleListener)
-        updateApprovalsTitle()
+        approvals.addListener(approvalsBadgeListener)
+        setBadge(0, "Server", approvals.store.size())
+
+        val interceptBadgeTimer = javax.swing.Timer(1000) {
+            setBadge(interceptIndex, "Intercept", interceptManager.store.size())
+        }
+        interceptBadgeTimer.start()
+        setBadge(interceptIndex, "Intercept", interceptManager.store.size())
 
         api.userInterface().registerSuiteTab("MCP", tabbedPane)
         api.userInterface().registerContextMenuItemsProvider(AutoApproveContextMenu(config))
@@ -46,10 +53,10 @@ class BurpMcpExtension : BurpExtension {
         }
 
         api.extension().registerUnloadingHandler {
+            interceptBadgeTimer.stop()
             interceptTab.cleanup()
-            approvalsTab.cleanup()
-            approvals.removeListener(approvalsTitleListener)
-            tab.cleanup()
+            approvals.removeListener(approvalsBadgeListener)
+            serverTab.cleanup()
             server.stop()
             interceptManager.deregister()
             config.cleanup()

@@ -145,7 +145,14 @@ data class GetInterceptedResponses(override val count: Int, override val offset:
 data class GetInterceptedMessageDetail(val messageId: String)
 
 @Serializable
-data class ForwardInterceptedMessage(val messageId: String, val modifiedRaw: String? = null)
+data class Replacement(val find: String, val replace: String)
+
+@Serializable
+data class ForwardInterceptedMessage(
+    val messageId: String,
+    val modifiedRaw: String? = null,
+    val replacements: List<Replacement>? = null
+)
 
 @Serializable
 data class DropInterceptedMessage(val messageId: String)
