@@ -145,6 +145,10 @@ private fun checkHttpRequestPermission(
     if (config.useBurpScopeForApproval && isInBurpScope(hostname, port, secure, api)) {
         return ApprovalDecision.Allow
     }
+    if (config.autoApproveAllNewTargets) {
+        config.addAutoApproveTarget("$hostname:$port")
+        return ApprovalDecision.Allow
+    }
 
     val pending = approvals.enqueue(ApprovalKind.HTTP_REQUEST, hostname, port, preview)
     val idStr = pending?.id ?: "(queue full)"
@@ -165,6 +169,7 @@ private fun checkHistoryPermission(
     approvals: PendingApprovalManager
 ): ApprovalDecision {
     if (!config.requireHistoryAccessApproval) return ApprovalDecision.Allow
+    if (config.autoApproveAllNewTargets) return ApprovalDecision.Allow
 
     val alwaysAllowed = when (historyType) {
         "HTTP" -> config.alwaysAllowHttpHistory

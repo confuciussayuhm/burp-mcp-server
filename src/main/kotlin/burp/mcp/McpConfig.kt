@@ -23,6 +23,16 @@ class McpConfig(storage: PersistedObject, private val logging: Logging) {
             _useBurpScopeForApproval = value
             onUseBurpScopeChanged?.invoke()
         }
+    private var _autoApproveAllNewTargets by storage.boolean(false, key = "autoApproveAllNewTargets")
+
+    var onAutoApproveAllNewTargetsChanged: (() -> Unit)? = null
+
+    var autoApproveAllNewTargets: Boolean
+        get() = _autoApproveAllNewTargets
+        set(value) {
+            _autoApproveAllNewTargets = value
+            onAutoApproveAllNewTargetsChanged?.invoke()
+        }
     private var _alwaysAllowHttpHistory by storage.boolean(false, key = "alwaysAllowHttpHistory")
     private var _alwaysAllowWebSocketHistory by storage.boolean(false, key = "alwaysAllowWebSocketHistory")
 
@@ -80,6 +90,7 @@ class McpConfig(storage: PersistedObject, private val logging: Logging) {
         onAutoApproveTargetsChanged = null
         onAlwaysAllowHistoryChanged = null
         onUseBurpScopeChanged = null
+        onAutoApproveAllNewTargetsChanged = null
     }
 }
 

@@ -66,6 +66,7 @@ class ServerTab(
         SwingUtilities.invokeLater { refreshApprovedTargetsList(); refreshApprovalsCard() }
     }
     private var alwaysAllowSyncCallback: (() -> Unit)? = null
+    private var autoApproveAllSyncCallback: (() -> Unit)? = null
     private val scopeListener: () -> Unit = {
         SwingUtilities.invokeLater { refreshApprovalsCard() }
     }
@@ -90,6 +91,9 @@ class ServerTab(
         }
         if (alwaysAllowSyncCallback != null && config.onAlwaysAllowHistoryChanged === alwaysAllowSyncCallback) {
             config.onAlwaysAllowHistoryChanged = null
+        }
+        if (autoApproveAllSyncCallback != null && config.onAutoApproveAllNewTargetsChanged === autoApproveAllSyncCallback) {
+            config.onAutoApproveAllNewTargetsChanged = null
         }
         if (config.onUseBurpScopeChanged === scopeListener) {
             config.onUseBurpScopeChanged = null
@@ -409,6 +413,13 @@ class ServerTab(
         val useBurpScope = JCheckBox("Use Burp Target Scope to auto-approve", config.useBurpScopeForApproval).apply {
             toolTipText = "Anything in Burp → Target → Scope is auto-approved without queueing a pending approval."
         }
+        val autoApproveAll = JCheckBox(
+            "Auto-approve all new targets (capture mode)",
+            config.autoApproveAllNewTargets
+        ).apply {
+            toolTipText = "While on, every new target is auto-approved AND added to the auto-approve list as host:port. " +
+                "Use to capture miscellaneous hosts during validation."
+        }
         val alwaysHttp = JCheckBox("HTTP history", config.alwaysAllowHttpHistory)
         val alwaysWs = JCheckBox("WebSocket history", config.alwaysAllowWebSocketHistory)
 
@@ -416,6 +427,7 @@ class ServerTab(
         httpApproval.addActionListener { config.requireHttpRequestApproval = httpApproval.isSelected }
         historyApproval.addActionListener { config.requireHistoryAccessApproval = historyApproval.isSelected }
         useBurpScope.addActionListener { config.useBurpScopeForApproval = useBurpScope.isSelected }
+        autoApproveAll.addActionListener { config.autoApproveAllNewTargets = autoApproveAll.isSelected }
         alwaysHttp.addActionListener { config.alwaysAllowHttpHistory = alwaysHttp.isSelected }
         alwaysWs.addActionListener { config.alwaysAllowWebSocketHistory = alwaysWs.isSelected }
 
@@ -428,6 +440,14 @@ class ServerTab(
         alwaysAllowSyncCallback = syncCallback
         config.onAlwaysAllowHistoryChanged = syncCallback
 
+        val autoApproveAllSync: () -> Unit = {
+            SwingUtilities.invokeLater {
+                autoApproveAll.isSelected = config.autoApproveAllNewTargets
+            }
+        }
+        autoApproveAllSyncCallback = autoApproveAllSync
+        config.onAutoApproveAllNewTargetsChanged = autoApproveAllSync
+
         val historyCaption = UiKit.caption("History — always allow (skip approval queue)")
         val historyRow = JPanel(FlowLayout(FlowLayout.LEFT, UiKit.GAP_WIDE, 0)).apply {
             isOpaque = false
@@ -438,7 +458,7 @@ class ServerTab(
         val body = JPanel().apply {
             isOpaque = false
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
-            listOf(configEditing, httpApproval, historyApproval, useBurpScope).forEach {
+            listOf(configEditing, httpApproval, historyApproval, useBurpScope, autoApproveAll).forEach {
                 it.alignmentX = JPanel.LEFT_ALIGNMENT
                 add(it)
             }
