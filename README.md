@@ -7,8 +7,11 @@ Burp Suite extension that exposes an MCP server, letting LLM-powered tools inter
 - **30 MCP tools** across categories: HTTP requests, proxy history, encoding, scanner, Collaborator, intercept, config, editor, Repeater/Intruder
 - **Programmatic proxy intercept** — hold, inspect, modify, forward, or drop requests and responses from an MCP client
 - **Streamable HTTP transport** on configurable host:port (default `127.0.0.1:9876`)
-- **Approval controls** for HTTP requests and history access with interactive dialogs
-- **Auto-approve targets** by hostname, host:port, or wildcard pattern
+- **Non-blocking approval queue** — MCP-initiated HTTP requests and history access raise pending approvals you resolve from the **Approvals** panel, with a record of recent decisions
+- **Burp Target Scope integration** — anything in **Target → Scope** can be auto-approved without queueing
+- **Capture mode** — optionally auto-approve *every* new target and add it to the auto-approve list as you browse
+- **Auto-approve targets** by hostname, host:port, or wildcard pattern, addable via a right-click **MCP: Auto-approve target** context menu
+- **Auto-restart** — the server restarts automatically when you change the bind host or port
 
 ## Requirements
 
@@ -81,15 +84,19 @@ Any MCP client that supports HTTP transport can connect to `http://<host>:<port>
 
 ## Configuration
 
-All settings are configurable from the **MCP** tab in Burp Suite and persist across sessions.
+All settings are configurable from the **MCP → Server** tab in Burp Suite and persist across sessions. Changing the bind host or port restarts the server automatically.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | Boolean | `true` | Start the MCP server when the extension loads |
 | `host` | String | `127.0.0.1` | Bind address for the HTTP server |
 | `port` | Int | `9876` | Listen port for the HTTP server |
-| `requireHttpRequestApproval` | Boolean | `true` | Prompt before MCP-initiated HTTP requests are sent |
-| `requireHistoryAccessApproval` | Boolean | `true` | Prompt before exposing proxy history to MCP clients |
+| `requireHttpRequestApproval` | Boolean | `true` | Queue a pending approval before MCP-initiated HTTP requests are sent |
+| `requireHistoryAccessApproval` | Boolean | `true` | Queue a pending approval before exposing proxy history to MCP clients |
+| `useBurpScopeForApproval` | Boolean | `true` | Auto-approve any target already in Burp's **Target → Scope** without queueing |
+| `autoApproveAllNewTargets` | Boolean | `false` | **Capture mode** — auto-approve every new target and add it to the auto-approve list as `host:port` |
+| `alwaysAllowHttpHistory` | Boolean | `false` | Skip the approval queue for HTTP history access |
+| `alwaysAllowWebSocketHistory` | Boolean | `false` | Skip the approval queue for WebSocket history access |
 | `configEditingTooling` | Boolean | `false` | Enable `set_project_options` / `set_user_options` tools |
 | `autoApproveTargets` | String | *(empty)* | Comma-separated list of auto-approved hosts |
 
@@ -101,7 +108,24 @@ All settings are configurable from the **MCP** tab in Burp Suite and persist acr
 | `hostname:port` | `example.com:8443` | Exact match on hostname and port |
 | `*.domain` | `*.internal.corp` | Wildcard — matches any subdomain |
 
-Targets can be added manually in the config tab or via the approval dialog ("Always Allow Host" / "Always Allow Host:Port").
+Targets can be added in several ways:
+
+- Typed into the **Approved targets** list on the **MCP → Server → Approvals** panel
+- Resolving a pending approval with **Approve host** or **Approve host:port**
+- Right-clicking a request/response anywhere in Burp and choosing **MCP: Auto-approve target** (supports single hosts, host:port, and bulk-adding all selected targets)
+- Automatically, while **capture mode** is enabled
+
+## Approvals
+
+When `requireHttpRequestApproval` or `requireHistoryAccessApproval` is enabled, MCP actions that aren't already covered (by an auto-approve target, Burp scope, or an always-allow setting) raise a **pending approval** instead of blocking. The MCP client receives an immediate "pending approval queued" response, and the request is held until you decide.
+
+Resolve pending approvals from the **MCP → Server → Approvals** panel:
+
+1. **Pending** — each entry shows the target host:port (or history type) and how many times it has been hit while waiting
+2. **Decide** — **Approve host** / **Approve host:port** adds the target to the auto-approve list and releases it; **Always allow** clears the queue for a history type; **Deny** rejects it
+3. **History** — recently resolved approvals are kept in a **Recent decisions** list for reference
+
+The **Server** sub-tab title shows a badge with the current pending-approval count. The **Approvals** panel also reflects whether Burp scope auto-approval is active and how many targets are currently approved, and includes a **Check scope** helper to test whether a given host/URL is in Burp's scope.
 
 ## Tools
 
