@@ -119,6 +119,38 @@ data class GetProxyHttpHistoryRegex(
 data class GetProxyHttpHistoryItem(val id: Int)
 
 @Serializable
+data class GetMcpRequestHistory(
+    override val count: Int,
+    override val offset: Int,
+    val includeRequestBody: Boolean? = null,
+    val includeResponseBody: Boolean? = null,
+    val includeHeaders: Boolean? = null,
+    val statusCodes: String? = null,
+    val methods: String? = null,
+    val host: String? = null,
+    val mimeTypes: String? = null,
+    val inScopeOnly: Boolean? = null
+) : Paginated
+
+@Serializable
+data class GetMcpRequestHistoryRegex(
+    val regex: String,
+    override val count: Int,
+    override val offset: Int,
+    val includeRequestBody: Boolean? = null,
+    val includeResponseBody: Boolean? = null,
+    val includeHeaders: Boolean? = null,
+    val statusCodes: String? = null,
+    val methods: String? = null,
+    val host: String? = null,
+    val mimeTypes: String? = null,
+    val inScopeOnly: Boolean? = null
+) : Paginated
+
+@Serializable
+data class GetMcpRequestHistoryItem(val id: Int)
+
+@Serializable
 data class GetProxyWebsocketHistory(override val count: Int, override val offset: Int) : Paginated
 
 @Serializable

@@ -5,6 +5,7 @@ import burp.api.montoya.proxy.ProxyHttpRequestResponse
 import burp.api.montoya.proxy.ProxyWebSocketMessage
 import burp.api.montoya.scanner.audit.issues.AuditIssue
 import burp.api.montoya.websocket.Direction
+import burp.mcp.history.McpRequestRecord
 import kotlinx.serialization.Serializable
 
 fun AuditIssue.toSerializableForm(): IssueDetails {
@@ -107,6 +108,35 @@ fun ProxyHttpRequestResponse.toSerializableProxyForm(
         originalResponseBody = if (includeModifiedVersions && respModified && includeResponseBody && origResp != null)
             bodyToStringOrNull(origResp) else null,
         notes = annotations()?.notes()
+    )
+}
+
+fun McpRequestRecord.toSerializableForm(
+    includeRequestBody: Boolean = true,
+    includeResponseBody: Boolean = true,
+    includeHeaders: Boolean = true
+): SerializableMcpRequestItem {
+    val req = request
+    val resp = response
+    val service = try { req.httpService() } catch (_: Exception) { null }
+
+    return SerializableMcpRequestItem(
+        id = id,
+        timestamp = timestamp,
+        httpVersion = httpVersion,
+        host = service?.host(),
+        port = service?.port(),
+        secure = service?.secure(),
+        method = try { req.method() } catch (_: Exception) { null },
+        url = try { req.url() } catch (_: Exception) { null },
+        statusCode = try { resp?.statusCode()?.toInt() } catch (_: Exception) { null },
+        mimeType = try { resp?.mimeType()?.name } catch (_: Exception) { null },
+        requestLength = try { req.toByteArray().length() } catch (_: Exception) { null },
+        responseLength = try { resp?.toByteArray()?.length() } catch (_: Exception) { null },
+        requestHeaders = if (includeHeaders) headersToString(req) else null,
+        requestBody = if (includeRequestBody) bodyToStringOrNull(req) else null,
+        responseHeaders = if (includeHeaders && resp != null) headersToString(resp) else null,
+        responseBody = if (includeResponseBody && resp != null) bodyToStringOrNull(resp) else null
     )
 }
 
@@ -214,6 +244,28 @@ data class SerializableProxyHttpItem(
     val originalResponseHeaders: String? = null,
     val originalResponseBody: String? = null,
     val notes: String?
+)
+
+@Serializable
+data class SerializableMcpRequestItem(
+    val id: Int,
+    // Epoch milliseconds at which the MCP issued the request.
+    val timestamp: Long,
+    val httpVersion: String,
+    val host: String?,
+    val port: Int?,
+    val secure: Boolean?,
+    val method: String?,
+    val url: String?,
+    val statusCode: Int?,
+    val mimeType: String?,
+    // Full on-the-wire byte lengths (headers + body) as sent/received.
+    val requestLength: Int?,
+    val responseLength: Int?,
+    val requestHeaders: String?,
+    val requestBody: String?,
+    val responseHeaders: String?,
+    val responseBody: String?
 )
 
 @Serializable
