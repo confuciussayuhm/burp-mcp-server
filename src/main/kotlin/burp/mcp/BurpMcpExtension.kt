@@ -3,6 +3,7 @@ package burp.mcp
 import burp.api.montoya.BurpExtension
 import burp.api.montoya.MontoyaApi
 import burp.mcp.approval.PendingApprovalManager
+import burp.mcp.history.McpRequestHistory
 import burp.mcp.intercept.InterceptManager
 import burp.mcp.intercept.InterceptTab
 import javax.swing.JTabbedPane
@@ -17,16 +18,19 @@ class BurpMcpExtension : BurpExtension {
         val interceptManager = InterceptManager(api)
         interceptManager.register()
         val approvals = PendingApprovalManager()
+        val requestHistory = McpRequestHistory(api.persistence().extensionData())
 
-        val server = McpServer(api, config, interceptManager, approvals)
+        val server = McpServer(api, config, interceptManager, approvals, requestHistory)
 
         val tabbedPane = JTabbedPane()
         val serverTab = ServerTab(api, config, server, interceptManager, approvals)
         val interceptTab = InterceptTab(api, interceptManager)
+        val requestLogTab = RequestLogTab(api, requestHistory)
 
         tabbedPane.addTab("Server", serverTab.component)
         val interceptIndex = tabbedPane.tabCount
         tabbedPane.addTab("Intercept", interceptTab.component)
+        tabbedPane.addTab("Request Log", requestLogTab.component)
 
         fun setBadge(index: Int, base: String, count: Int) {
             tabbedPane.setTitleAt(index, if (count > 0) "$base ($count)" else base)
@@ -55,6 +59,7 @@ class BurpMcpExtension : BurpExtension {
         api.extension().registerUnloadingHandler {
             interceptBadgeTimer.stop()
             interceptTab.cleanup()
+            requestLogTab.cleanup()
             approvals.removeListener(approvalsBadgeListener)
             serverTab.cleanup()
             server.stop()

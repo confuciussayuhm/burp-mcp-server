@@ -12,6 +12,8 @@ import burp.mcp.McpConfig
 import burp.mcp.approval.ApprovalDecision
 import burp.mcp.approval.ApprovalKind
 import burp.mcp.approval.PendingApprovalManager
+import burp.mcp.history.McpRequestHistory
+import burp.mcp.history.McpRequestRecord
 import burp.mcp.intercept.InterceptManager
 import burp.mcp.intercept.MessageResolution
 import burp.mcp.intercept.PendingRequest
@@ -89,6 +91,69 @@ private fun filterProxyHistory(
         val typeList = mimeTypes.split(",").map { it.trim().uppercase() }
         seq = seq.filter { item ->
             try { item.mimeType()?.name?.uppercase() in typeList } catch (_: Exception) { false }
+        }
+    }
+
+    return seq
+}
+
+private fun filterMcpHistory(
+    items: List<McpRequestRecord>,
+    statusCodes: String?,
+    methods: String?,
+    host: String?,
+    mimeTypes: String?,
+    inScopeOnly: Boolean
+): Sequence<McpRequestRecord> {
+    var seq = items.asSequence()
+
+    if (inScopeOnly) {
+        seq = seq.filter { try { it.request.isInScope } catch (_: Exception) { false } }
+    }
+
+    if (!methods.isNullOrBlank()) {
+        val methodList = methods.split(",").map { it.trim().uppercase() }
+        seq = seq.filter { item ->
+            try { item.request.method()?.uppercase() in methodList } catch (_: Exception) { false }
+        }
+    }
+
+    if (!host.isNullOrBlank()) {
+        seq = seq.filter { item ->
+            try {
+                val itemHost = item.request.httpService()?.host() ?: return@filter false
+                if (host.startsWith("*.")) {
+                    val domain = host.substring(2)
+                    itemHost.equals(domain, ignoreCase = true) || itemHost.endsWith(".$domain", ignoreCase = true)
+                } else {
+                    itemHost.equals(host, ignoreCase = true)
+                }
+            } catch (_: Exception) { false }
+        }
+    }
+
+    if (!statusCodes.isNullOrBlank()) {
+        val filters = statusCodes.split(",").map { it.trim().lowercase() }
+        seq = seq.filter { item ->
+            try {
+                val code = item.response?.statusCode()?.toInt() ?: return@filter false
+                filters.any { f ->
+                    when {
+                        f.endsWith("xx") -> {
+                            val prefix = f.dropLast(2).toIntOrNull() ?: return@any false
+                            code / 100 == prefix
+                        }
+                        else -> f.toIntOrNull() == code
+                    }
+                }
+            } catch (_: Exception) { false }
+        }
+    }
+
+    if (!mimeTypes.isNullOrBlank()) {
+        val typeList = mimeTypes.split(",").map { it.trim().uppercase() }
+        seq = seq.filter { item ->
+            try { item.response?.mimeType()?.name?.uppercase() in typeList } catch (_: Exception) { false }
         }
     }
 
@@ -205,7 +270,8 @@ fun Server.registerTools(
     api: MontoyaApi,
     config: McpConfig,
     interceptManager: InterceptManager,
-    approvals: PendingApprovalManager
+    approvals: PendingApprovalManager,
+    requestHistory: McpRequestHistory
 ) {
 
     // 1. send_http1_request
@@ -226,6 +292,7 @@ fun Server.registerTools(
         val fixedContent = content.replace("\r", "").replace("\n", "\r\n")
         val request = HttpRequest.httpRequest(toMontoyaService(), fixedContent)
         val response = api.http().sendRequest(request)
+        requestHistory.record(response?.request() ?: request, response?.response(), "HTTP/1.1")
         response?.toString() ?: "<no response>"
     }
 
@@ -269,6 +336,7 @@ fun Server.registerTools(
         val headerList = (fixedPseudoHeaders + headers).map { HttpHeader.httpHeader(it.key.lowercase(), it.value) }
         val request = HttpRequest.http2Request(toMontoyaService(), headerList, requestBody)
         val response = api.http().sendRequest(request, HttpMode.HTTP_2)
+        requestHistory.record(response?.request() ?: request, response?.response(), "HTTP/2")
         response?.toString() ?: "<no response>"
     }
 
@@ -424,6 +492,52 @@ fun Server.registerTools(
         compactJson.encodeToString(item.toSerializableProxyForm(
             includeRequestBody = true, includeResponseBody = true, includeHeaders = true,
             includeModifiedVersions = true
+        ))
+    }
+
+    val mcpRequestHistoryDescription = "Retrieves the history of HTTP requests issued by this MCP server's own " +
+        "send_http1_request and send_http2_request tools. These requests are sent via Burp's HTTP API, which bypasses " +
+        "the proxy and Repeater — so they do NOT appear in get_proxy_http_history or the Repeater/Proxy UI. This is the " +
+        "only way to retrieve them after the fact (e.g. for findings that were tested directly via the MCP). " +
+        "Each item carries requestLength/responseLength (full on-the-wire byte counts) and a timestamp. " +
+        "Set includeRequestBody/includeResponseBody to false to exclude bodies, includeHeaders to false for a metadata-only view. " +
+        "Filter by statusCodes (e.g. '200', '2xx', '4xx,5xx'), methods (e.g. 'GET,POST'), host (e.g. 'example.com' or '*.example.com'), " +
+        "mimeTypes (e.g. 'HTML,JSON'), and inScopeOnly. Newest first. Use get_mcp_request_history_item for a single item by ID."
+
+    // 19c. get_mcp_request_history (paginated)
+    mcpPaginatedTool<GetMcpRequestHistory>(mcpRequestHistoryDescription) {
+        filterMcpHistory(requestHistory.list(), statusCodes, methods, host, mimeTypes, inScopeOnly == true)
+            .map { truncateIfNeeded(compactJson.encodeToString(it.toSerializableForm(
+                includeRequestBody != false, includeResponseBody != false, includeHeaders != false
+            ))) }
+    }
+
+    // 19d. get_mcp_request_history_regex (paginated)
+    mcpPaginatedTool<GetMcpRequestHistoryRegex>(
+        "Searches the MCP-issued request history by regex on full request/response content, with the same filtering and output options as get_mcp_request_history."
+    ) {
+        val compiledRegex = Pattern.compile(regex)
+        filterMcpHistory(requestHistory.list(), statusCodes, methods, host, mimeTypes, inScopeOnly == true)
+            .filter { record ->
+                try {
+                    compiledRegex.matcher(record.request.toString()).find() ||
+                        (record.response?.let { compiledRegex.matcher(it.toString()).find() } ?: false)
+                } catch (_: Exception) { false }
+            }
+            .map { truncateIfNeeded(compactJson.encodeToString(it.toSerializableForm(
+                includeRequestBody != false, includeResponseBody != false, includeHeaders != false
+            ))) }
+    }
+
+    // 19e. get_mcp_request_history_item (single item by ID)
+    mcpTool<GetMcpRequestHistoryItem>(
+        "Retrieves a single MCP-issued request history item by its ID, with full headers and bodies. " +
+        "Use get_mcp_request_history first to browse items and find IDs."
+    ) {
+        val item = requestHistory.get(id)
+            ?: return@mcpTool "No MCP request history item found with ID: $id"
+        compactJson.encodeToString(item.toSerializableForm(
+            includeRequestBody = true, includeResponseBody = true, includeHeaders = true
         ))
     }
 
