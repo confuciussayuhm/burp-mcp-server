@@ -1,6 +1,7 @@
 package burp.mcp.schema
 
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -39,9 +40,38 @@ fun getJsonSchemaForProperty(kType: kotlin.reflect.KType): JsonElement {
             JsonObject(mapOf("type" to JsonPrimitive("object"), "additionalProperties" to valueSchema))
         }
 
-        else ->
-            JsonObject(mapOf("type" to JsonPrimitive("object")))
+        else -> {
+            val klass = kType.classifier as? KClass<*>
+            when {
+                klass == null -> JsonObject(mapOf("type" to JsonPrimitive("object")))
+                // Enums become a string constrained to the enum's constant names.
+                klass.java.isEnum -> {
+                    val values = klass.java.enumConstants.orEmpty().map { JsonPrimitive((it as Enum<*>).name) }
+                    JsonObject(mapOf("type" to JsonPrimitive("string"), "enum" to JsonArray(values)))
+                }
+                // Nested data classes (e.g. Replacement, ParamUpdate) recurse into a full object
+                // schema instead of the opaque bare {"type":"object"} that hid their fields.
+                klass.isData -> objectSchema(klass)
+                else -> JsonObject(mapOf("type" to JsonPrimitive("object")))
+            }
+        }
     }
+}
+
+private fun objectSchema(klass: KClass<*>): JsonObject {
+    val properties = mutableMapOf<String, JsonElement>()
+    val required = mutableListOf<String>()
+    for (prop in klass.memberProperties) {
+        properties[prop.name] = getJsonSchemaForProperty(prop.returnType)
+        if (!prop.returnType.isMarkedNullable) required.add(prop.name)
+    }
+    return JsonObject(
+        mapOf(
+            "type" to JsonPrimitive("object"),
+            "properties" to JsonObject(properties),
+            "required" to JsonArray(required.map { JsonPrimitive(it) })
+        )
+    )
 }
 
 fun KClass<*>.asInputSchema(): ToolSchema {

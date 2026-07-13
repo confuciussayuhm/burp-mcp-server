@@ -6,7 +6,12 @@ import burp.api.montoya.burpsuite.TaskExecutionEngine.TaskExecutionEngineState.R
 import burp.api.montoya.collaborator.InteractionFilter
 import burp.api.montoya.core.BurpSuiteEdition
 import burp.api.montoya.http.HttpMode
+import burp.api.montoya.http.HttpService
+import burp.api.montoya.http.RedirectionMode
+import burp.api.montoya.http.RequestOptions
 import burp.api.montoya.http.message.HttpHeader
+import burp.api.montoya.http.message.params.HttpParameter
+import burp.api.montoya.http.message.params.HttpParameterType
 import burp.api.montoya.http.message.requests.HttpRequest
 import burp.mcp.McpConfig
 import burp.mcp.approval.ApprovalDecision
@@ -727,5 +732,184 @@ fun Server.registerTools(
         message.future.complete(MessageResolution.Drop)
         api.logging().logToOutput("MCP dropped message $messageId")
         "Message $messageId has been dropped"
+    }
+
+    // 31. replay_proxy_history_item — capture -> mutate one thing -> resend byte-faithfully
+    mcpTool<ReplayProxyHistoryItem>(
+        "Replays a captured proxy history request with surgical mutations, preserving every other byte " +
+        "(header order, casing, cookies) so the request stays browser-faithful. Find the id via " +
+        "get_proxy_http_history. Apply any of: replacements (ordered find/replace on the raw message), " +
+        "setHeaders (add-or-update), updateParams (type url|body|cookie), setBody, setPath, setMethod, and " +
+        "retargetHost/retargetPort/retargetTls. Control transport with httpMode (AUTO|HTTP_1|HTTP_2|HTTP_2_IGNORE_ALPN), " +
+        "sni, redirectionMode (ALWAYS|NEVER|SAME_HOST|IN_SCOPE), responseTimeoutMs. Returns the exact request sent and the response."
+    ) {
+        val decision = checkHistoryPermission("HTTP", config, approvals)
+        if (decision is ApprovalDecision.Deny) return@mcpTool decision.reason
+
+        val item = api.proxy().history().firstOrNull { it.id() == id }
+            ?: return@mcpTool "No history item found with ID: $id"
+        var request = (try { item.finalRequest() } catch (_: Exception) { null } ?: item.request())
+            ?: return@mcpTool "History item $id has no request"
+
+        // Retarget first so raw rebuilds and downstream mutations keep the new service.
+        if (retargetHost != null || retargetPort != null || retargetTls != null) {
+            val svc = request.httpService()
+            request = request.withService(
+                HttpService.httpService(retargetHost ?: svc.host(), retargetPort ?: svc.port(), retargetTls ?: svc.secure())
+            )
+        }
+
+        // Ordered raw find/replace (same semantics as forward_intercepted_message), then rebuild.
+        if (!replacements.isNullOrEmpty()) {
+            var working = request.toString()
+            for ((index, r) in replacements.withIndex()) {
+                if (r.find.isEmpty()) return@mcpTool "Error: replacement[$index].find is empty."
+                if (!working.contains(r.find)) {
+                    val preview = r.find.take(80).replace("\n", "\\n")
+                    return@mcpTool "Error: replacement[$index].find not present: \"$preview\""
+                }
+                working = working.replace(r.find, r.replace)
+            }
+            request = HttpRequest.httpRequest(request.httpService(), working)
+        }
+
+        if (setMethod != null) request = request.withMethod(setMethod)
+        if (setPath != null) request = request.withPath(setPath)
+        if (setBody != null) request = request.withBody(setBody)
+        setHeaders?.forEach { (k, v) -> request = request.withUpdatedHeader(k, v) }
+        updateParams?.forEach { p ->
+            val type = when (p.type.lowercase()) {
+                "url" -> HttpParameterType.URL
+                "body" -> HttpParameterType.BODY
+                "cookie" -> HttpParameterType.COOKIE
+                else -> return@mcpTool "Error: unknown param type '${p.type}' (use url|body|cookie)"
+            }
+            request = request.withParameter(HttpParameter.parameter(p.name, p.value, type))
+        }
+
+        var opts = RequestOptions.requestOptions()
+        if (httpMode != null) {
+            val mode = try { HttpMode.valueOf(httpMode.uppercase()) } catch (_: Exception) {
+                return@mcpTool "Error: invalid httpMode '$httpMode' (AUTO|HTTP_1|HTTP_2|HTTP_2_IGNORE_ALPN)"
+            }
+            opts = opts.withHttpMode(mode)
+        }
+        if (sni != null) opts = opts.withServerNameIndicator(sni)
+        if (redirectionMode != null) {
+            val rm = try { RedirectionMode.valueOf(redirectionMode.uppercase()) } catch (_: Exception) {
+                return@mcpTool "Error: invalid redirectionMode '$redirectionMode' (ALWAYS|NEVER|SAME_HOST|IN_SCOPE)"
+            }
+            opts = opts.withRedirectionMode(rm)
+        }
+        if (responseTimeoutMs != null) opts = opts.withResponseTimeout(responseTimeoutMs)
+
+        api.logging().logToOutput("MCP replay of history item $id -> ${request.httpService().host()}")
+        val response = api.http().sendRequest(request, opts)
+        requestHistory.record(response?.request() ?: request, response?.response(), "replay")
+        buildString {
+            appendLine("=== SENT REQUEST ===")
+            appendLine(request.toString())
+            appendLine()
+            appendLine("=== RESPONSE ===")
+            append(response?.response()?.toString() ?: "<no response>")
+        }
+    }
+
+    // 32. get_proxy_http_history_item_raw — untruncated raw bytes for faithful round-tripping
+    mcpTool<GetProxyHttpHistoryItemRaw>(
+        "Retrieves the FULL raw bytes of a proxy history item (rawRequest + rawFinalRequest + response), " +
+        "untruncated and including the request start-line the split headers/body fields drop. Use this to " +
+        "get an exact request to hand to send_http1_request, or use replay_proxy_history_item to mutate + resend."
+    ) {
+        val decision = checkHistoryPermission("HTTP", config, approvals)
+        if (decision is ApprovalDecision.Deny) return@mcpTool decision.reason
+        val item = api.proxy().history().firstOrNull { it.id() == id }
+            ?: return@mcpTool "No history item found with ID: $id"
+        compactJson.encodeToString(
+            item.toSerializableProxyForm(
+                includeRequestBody = true, includeResponseBody = true, includeHeaders = true,
+                includeModifiedVersions = true, includeRaw = true
+            )
+        )
+    }
+
+    // 33. intruder_batch — programmatic Intruder analog (send_to_intruder only opens the UI)
+    mcpTool<IntruderBatch>(
+        "Runs an Intruder-style batch: takes a base request (baseId from proxy history, or baseContent + " +
+        "targetHostname/targetPort/usesHttps), substitutes the literal marker with each payload, sends them " +
+        "(optionally throttled with throttleMs), and returns per-payload status/length/timing. Unlike " +
+        "send_to_intruder (UI only), this executes and returns results. Set httpMode to pin the HTTP version."
+    ) {
+        val decision = checkHistoryPermission("HTTP", config, approvals)
+        if (decision is ApprovalDecision.Deny) return@mcpTool decision.reason
+        if (marker.isEmpty()) return@mcpTool "Error: marker must be non-empty."
+        if (payloads.isEmpty()) return@mcpTool "Error: payloads list is empty."
+
+        val base: HttpRequest = when {
+            baseId != null -> {
+                val item = api.proxy().history().firstOrNull { it.id() == baseId }
+                    ?: return@mcpTool "No history item found with ID: $baseId"
+                (try { item.finalRequest() } catch (_: Exception) { null } ?: item.request())
+                    ?: return@mcpTool "History item $baseId has no request"
+            }
+            baseContent != null && targetHostname != null && targetPort != null && usesHttps != null ->
+                HttpRequest.httpRequest(
+                    HttpService.httpService(targetHostname, targetPort, usesHttps),
+                    baseContent.replace("\r", "").replace("\n", "\r\n")
+                )
+            else -> return@mcpTool "Error: provide baseId, or baseContent + targetHostname + targetPort + usesHttps."
+        }
+
+        val baseRaw = base.toString()
+        if (!baseRaw.contains(marker)) return@mcpTool "Error: marker '$marker' not present in the base request."
+        val service = base.httpService()
+        val mode = httpMode?.let { try { HttpMode.valueOf(it.uppercase()) } catch (_: Exception) { null } }
+
+        api.logging().logToOutput("MCP intruder_batch: ${payloads.size} payloads -> ${service.host()}")
+        val results = ArrayList<IntruderResult>(payloads.size)
+        for (payload in payloads) {
+            val req = HttpRequest.httpRequest(service, baseRaw.replace(marker, payload))
+            val start = System.currentTimeMillis()
+            try {
+                val resp = if (mode != null) api.http().sendRequest(req, mode) else api.http().sendRequest(req)
+                results.add(
+                    IntruderResult(
+                        payload = payload,
+                        statusCode = try { resp?.response()?.statusCode()?.toInt() } catch (_: Exception) { null },
+                        responseLength = try { resp?.response()?.toByteArray()?.length() } catch (_: Exception) { null },
+                        timingMs = System.currentTimeMillis() - start
+                    )
+                )
+            } catch (e: Exception) {
+                results.add(IntruderResult(payload = payload, error = e.message))
+            }
+            if (throttleMs != null && throttleMs > 0) Thread.sleep(throttleMs.toLong())
+        }
+        compactJson.encodeToString(results)
+    }
+
+    // 34. get_site_map — enumerate endpoints Burp already discovered (browse first, then read this)
+    mcpPaginatedTool<GetSiteMap>(
+        "Lists endpoints in Burp's site map (populated by browsing/proxying the app), optionally filtered by " +
+        "url prefix. Use this instead of re-crawling with curl — it reflects what the real browser already reached."
+    ) {
+        val decision = checkHistoryPermission("HTTP", config, approvals)
+        if (decision is ApprovalDecision.Deny) return@mcpPaginatedTool sequenceOf(decision.reason)
+        api.siteMap().requestResponses().asSequence()
+            .filter { rr ->
+                prefix == null || (try { rr.request()?.url()?.startsWith(prefix) == true } catch (_: Exception) { false })
+            }
+            .map { rr ->
+                val req = try { rr.request() } catch (_: Exception) { null }
+                val resp = try { rr.response() } catch (_: Exception) { null }
+                compactJson.encodeToString(
+                    SiteMapEntry(
+                        url = try { req?.url() } catch (_: Exception) { null },
+                        method = try { req?.method() } catch (_: Exception) { null },
+                        statusCode = try { resp?.statusCode()?.toInt() } catch (_: Exception) { null },
+                        mimeType = try { resp?.mimeType()?.name } catch (_: Exception) { null }
+                    )
+                )
+            }
     }
 }

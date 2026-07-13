@@ -172,8 +172,26 @@ The **Server** sub-tab title shows a badge with the current pending-approval cou
 |------|-------------|
 | `get_proxy_http_history` | List proxy HTTP history (paginated) |
 | `get_proxy_http_history_regex` | Search proxy HTTP history by regex (paginated) |
+| `get_proxy_http_history_item` | Get a single history item by ID (full headers/body + modified versions) |
+| `get_proxy_http_history_item_raw` | Get the FULL raw bytes of a history item (incl. request start-line), untruncated |
 | `get_proxy_websocket_history` | List proxy WebSocket history (paginated) |
 | `get_proxy_websocket_history_regex` | Search proxy WebSocket history by regex (paginated) |
+
+### Capture → Mutate → Replay
+
+Take a real browser request captured in proxy history, mutate one field, and resend it byte-faithfully
+(header order, casing, cookies preserved) so the request stays browser-faithful — the analog of manual
+Repeater/Intruder, driven programmatically.
+
+| Tool | Description |
+|------|-------------|
+| `replay_proxy_history_item` | Replay a captured request with surgical mutations (`replacements` / `setHeaders` / `updateParams` / `setBody` / `setPath` / `setMethod` / retarget host:port:tls) and transport control (`httpMode` AUTO\|HTTP_1\|HTTP_2\|HTTP_2_IGNORE_ALPN, `sni`, `redirectionMode`, `responseTimeoutMs`). Returns the exact request sent + the response. |
+| `intruder_batch` | Programmatic Intruder: substitute a `marker` in a base request (`baseId` from history, or `baseContent` + target) with each `payload`, send (optional `throttleMs`), return per-payload status/length/timing. Unlike `send_to_intruder` (UI only), this executes and returns results. |
+| `get_site_map` | List endpoints Burp discovered in the site map (populated by browsing), optionally filtered by url `prefix` (paginated). |
+
+> Fingerprint note: these tools send via Burp's HTTP stack, so the TLS/JA3 the target sees is Burp's
+> unless Burp egresses through a browser-JA3 upstream (e.g. an impersonating MITM proxy). The captured
+> request supplies faithful HTTP-layer bytes; the upstream supplies the TLS fingerprint.
 
 ### Scanner & Collaborator *(Professional Edition only)*
 
