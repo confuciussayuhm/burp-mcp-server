@@ -188,3 +188,54 @@ data class ForwardInterceptedMessage(
 
 @Serializable
 data class DropInterceptedMessage(val messageId: String)
+
+// Capture -> mutate -> replay
+
+/** One parameter mutation for replay. `type` is one of: url, body, cookie. */
+@Serializable
+data class ParamUpdate(val type: String, val name: String, val value: String)
+
+@Serializable
+data class ReplayProxyHistoryItem(
+    val id: Int,
+    val replacements: List<Replacement>? = null,
+    val setHeaders: Map<String, String>? = null,
+    val updateParams: List<ParamUpdate>? = null,
+    val setBody: String? = null,
+    val setPath: String? = null,
+    val setMethod: String? = null,
+    val retargetHost: String? = null,
+    val retargetPort: Int? = null,
+    val retargetTls: Boolean? = null,
+    // AUTO | HTTP_1 | HTTP_2 | HTTP_2_IGNORE_ALPN
+    val httpMode: String? = null,
+    val sni: String? = null,
+    // ALWAYS | NEVER | SAME_HOST | IN_SCOPE
+    val redirectionMode: String? = null,
+    val responseTimeoutMs: Long? = null
+)
+
+@Serializable
+data class GetProxyHttpHistoryItemRaw(val id: Int)
+
+@Serializable
+data class IntruderBatch(
+    val baseId: Int? = null,
+    val baseContent: String? = null,
+    val targetHostname: String? = null,
+    val targetPort: Int? = null,
+    val usesHttps: Boolean? = null,
+    // The literal marker string in the base request that each payload replaces.
+    val marker: String,
+    val payloads: List<String>,
+    // AUTO | HTTP_1 | HTTP_2 | HTTP_2_IGNORE_ALPN
+    val httpMode: String? = null,
+    val throttleMs: Int? = null
+)
+
+@Serializable
+data class GetSiteMap(
+    override val count: Int,
+    override val offset: Int,
+    val prefix: String? = null
+) : Paginated

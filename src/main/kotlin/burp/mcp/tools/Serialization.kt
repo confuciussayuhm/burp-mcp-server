@@ -65,7 +65,8 @@ fun ProxyHttpRequestResponse.toSerializableProxyForm(
     includeRequestBody: Boolean = true,
     includeResponseBody: Boolean = true,
     includeHeaders: Boolean = true,
-    includeModifiedVersions: Boolean = false
+    includeModifiedVersions: Boolean = false,
+    includeRaw: Boolean = false
 ): SerializableProxyHttpItem {
     val req = request()
     val finalReq = try { finalRequest() } catch (_: Exception) { null }
@@ -107,7 +108,12 @@ fun ProxyHttpRequestResponse.toSerializableProxyForm(
             headersToString(origResp) else null,
         originalResponseBody = if (includeModifiedVersions && respModified && includeResponseBody && origResp != null)
             bodyToStringOrNull(origResp) else null,
-        notes = annotations()?.notes()
+        notes = annotations()?.notes(),
+        // Full raw request bytes including the start-line (method/path/version), which the
+        // split headers/body fields drop. Needed to round-trip a captured request faithfully.
+        rawRequest = if (includeRaw && req != null) try { req.toString() } catch (_: Exception) { null } else null,
+        rawFinalRequest = if (includeRaw && reqModified && finalReq != null)
+            try { finalReq.toString() } catch (_: Exception) { null } else null
     )
 }
 
@@ -243,7 +249,27 @@ data class SerializableProxyHttpItem(
     // Only present when responseModified=true: the original response received from the server
     val originalResponseHeaders: String? = null,
     val originalResponseBody: String? = null,
-    val notes: String?
+    val notes: String?,
+    // Full raw request bytes (incl. start-line). Only populated when includeRaw=true.
+    val rawRequest: String? = null,
+    val rawFinalRequest: String? = null
+)
+
+@Serializable
+data class IntruderResult(
+    val payload: String,
+    val statusCode: Int? = null,
+    val responseLength: Int? = null,
+    val timingMs: Long? = null,
+    val error: String? = null
+)
+
+@Serializable
+data class SiteMapEntry(
+    val url: String?,
+    val method: String?,
+    val statusCode: Int?,
+    val mimeType: String?
 )
 
 @Serializable
