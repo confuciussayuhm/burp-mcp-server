@@ -239,3 +239,37 @@ data class GetSiteMap(
     override val offset: Int,
     val prefix: String? = null
 ) : Paginated
+
+// Session broker — capture a principal's live session and replay captured requests AS that principal
+// (concurrent multi-principal / IDOR testing without re-login or a device).
+
+@Serializable
+data class SessionCapture(
+    val role: String,
+    val host: String? = null,
+    val id: Int? = null,
+    val headerNames: List<String>? = null,
+    val note: String? = null
+)
+
+@Serializable
+data class SessionGet(val role: String)
+
+@Serializable
+data class SessionReplayAs(
+    val role: String,
+    val id: Int,
+    val setHeaders: Map<String, String>? = null,
+    val updateParams: List<ParamUpdate>? = null,
+    val setBody: String? = null,
+    val setPath: String? = null,
+    val setMethod: String? = null,
+    val retargetHost: String? = null,
+    val retargetPort: Int? = null,
+    val retargetTls: Boolean? = null,
+    // AUTO | HTTP_1 | HTTP_2 | HTTP_2_IGNORE_ALPN
+    val httpMode: String? = null,
+    // ALWAYS | NEVER | SAME_HOST | IN_SCOPE
+    val redirectionMode: String? = null,
+    val responseTimeoutMs: Long? = null
+)

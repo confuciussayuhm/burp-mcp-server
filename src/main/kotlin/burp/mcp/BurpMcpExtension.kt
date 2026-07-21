@@ -6,6 +6,8 @@ import burp.mcp.approval.PendingApprovalManager
 import burp.mcp.history.McpRequestHistory
 import burp.mcp.intercept.InterceptManager
 import burp.mcp.intercept.InterceptTab
+import burp.mcp.session.SessionStore
+import burp.mcp.session.SessionsTab
 import javax.swing.JTabbedPane
 import javax.swing.SwingUtilities
 
@@ -19,18 +21,21 @@ class BurpMcpExtension : BurpExtension {
         interceptManager.register()
         val approvals = PendingApprovalManager()
         val requestHistory = McpRequestHistory(api.persistence().extensionData())
+        val sessionStore = SessionStore(api.persistence().extensionData())
 
-        val server = McpServer(api, config, interceptManager, approvals, requestHistory)
+        val server = McpServer(api, config, interceptManager, approvals, requestHistory, sessionStore)
 
         val tabbedPane = JTabbedPane()
         val serverTab = ServerTab(api, config, server, interceptManager, approvals)
         val interceptTab = InterceptTab(api, interceptManager)
         val requestLogTab = RequestLogTab(api, requestHistory)
+        val sessionsTab = SessionsTab(sessionStore)
 
         tabbedPane.addTab("Server", serverTab.component)
         val interceptIndex = tabbedPane.tabCount
         tabbedPane.addTab("Intercept", interceptTab.component)
         tabbedPane.addTab("Request Log", requestLogTab.component)
+        tabbedPane.addTab("Sessions", sessionsTab.component)
 
         fun setBadge(index: Int, base: String, count: Int) {
             tabbedPane.setTitleAt(index, if (count > 0) "$base ($count)" else base)
@@ -60,6 +65,7 @@ class BurpMcpExtension : BurpExtension {
             interceptBadgeTimer.stop()
             interceptTab.cleanup()
             requestLogTab.cleanup()
+            sessionsTab.cleanup()
             approvals.removeListener(approvalsBadgeListener)
             serverTab.cleanup()
             server.stop()
