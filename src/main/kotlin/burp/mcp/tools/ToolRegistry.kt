@@ -37,6 +37,35 @@ private val compactJson = Json { explicitNulls = false }
 private fun maskSecret(s: String): String =
     if (s.length <= 12) "${s.take(4)}…(${s.length})" else "${s.take(10)}…(${s.length})"
 
+/** Parse the `name=value` from a `Set-Cookie` header value, ignoring the attributes after the first `;`. */
+private fun parseSetCookie(setCookie: String): Pair<String, String>? {
+    val first = setCookie.substringBefore(';').trim()
+    val eq = first.indexOf('=')
+    if (eq <= 0) return null
+    return first.substring(0, eq).trim() to first.substring(eq + 1).trim()
+}
+
+/**
+ * Roll a role's stored `Cookie` header forward using the `Set-Cookie` values from a response, so a
+ * target that ROTATES its session token on every response (e.g. belong-uat's `acsession`) can be
+ * replayed multi-step without 401ing after the first request. Existing cookies are kept; rotated names
+ * are overwritten; a cookie set to empty / `deleted` is dropped. Name-based merge (not Burp's global
+ * jar) so concurrent principals never collide — each role owns its own cookie set.
+ */
+private fun rollForwardCookies(current: String?, setCookies: List<String>): String {
+    val jar = LinkedHashMap<String, String>()
+    current?.split(";")?.forEach { part ->
+        val eq = part.indexOf('=')
+        if (eq > 0) jar[part.substring(0, eq).trim()] = part.substring(eq + 1).trim()
+    }
+    for (sc in setCookies) {
+        parseSetCookie(sc)?.let { (name, value) ->
+            if (value.isEmpty() || value.equals("deleted", ignoreCase = true)) jar.remove(name) else jar[name] = value
+        }
+    }
+    return jar.entries.joinToString("; ") { "${it.key}=${it.value}" }
+}
+
 private fun truncateIfNeeded(serialized: String): String {
     return if (serialized.length > 5000) {
         serialized.substring(0, 5000) + "... (truncated)"
@@ -907,7 +936,9 @@ fun Server.registerTools(
         "Cookie/Authorization/session headers (from session_capture), then applies optional mutations " +
         "(setHeaders, updateParams type url|body|cookie, setBody, setPath, setMethod, retargetHost/Port/Tls), " +
         "and sends it. This is the IDOR/authz primitive — e.g. replay owner_a's object-fetch AS tenant_b and " +
-        "check whether the backend leaks a's data to b. Returns the exact request sent and the response."
+        "check whether the backend leaks a's data to b. Returns the exact request sent and the response. On a " +
+        "target that rotates its session token per response, <role>'s stored cookie is rolled forward from the " +
+        "response Set-Cookie, so multi-step replay chains keep working instead of 401ing after the first request."
     ) {
         val decision = checkHistoryPermission("HTTP", config, approvals)
         if (decision is ApprovalDecision.Deny) return@mcpTool decision.reason
@@ -966,8 +997,34 @@ fun Server.registerTools(
         api.logging().logToOutput("MCP replay of history item $id AS role '$role' -> ${request.httpService().host()}")
         val response = api.http().sendRequest(request, opts)
         requestHistory.record(response?.request() ?: request, response?.response(), "replay-as:$role")
+
+        // Roll the role's session forward on any Set-Cookie in the response. A target that rotates its
+        // session token every response (belong-uat's `acsession`) would otherwise 401 on the NEXT
+        // replay, because the stored Cookie is a stale snapshot. Merge by name into the role's stored
+        // Cookie (per-role → concurrent principals don't collide), persist it, and ALSO mirror into
+        // Burp's cookie jar so Burp's own session-handling / UI reflect the rotation.
+        var rolledNote = ""
+        response?.response()?.let { resp ->
+            val setCookies = resp.headers()
+                .filter { it.name().equals("Set-Cookie", ignoreCase = true) }
+                .map { it.value() }
+            if (setCookies.isNotEmpty()) {
+                val rolled = rollForwardCookies(session.cookie, setCookies)
+                if (rolled.isNotEmpty() && rolled != session.cookie) {
+                    sessionStore.put(session.copy(cookie = rolled))
+                    rolledNote = " (session cookie rolled forward from Set-Cookie for next replay)"
+                }
+                val host = request.httpService().host()
+                for (sc in setCookies) {
+                    parseSetCookie(sc)?.let { (name, value) ->
+                        runCatching { api.http().cookieJar().setCookie(name, value, "/", host, null) }
+                    }
+                }
+            }
+        }
+
         buildString {
-            appendLine("=== REPLAYED history item $id AS role '$role' ===")
+            appendLine("=== REPLAYED history item $id AS role '$role'$rolledNote ===")
             appendLine("=== SENT REQUEST ===")
             appendLine(request.toString())
             appendLine()
