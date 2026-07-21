@@ -23,6 +23,8 @@ import burp.mcp.intercept.InterceptManager
 import burp.mcp.intercept.MessageResolution
 import burp.mcp.intercept.PendingRequest
 import burp.mcp.intercept.PendingResponse
+import burp.mcp.session.CapturedSession
+import burp.mcp.session.SessionStore
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import kotlinx.serialization.json.Json
 import java.awt.KeyboardFocusManager
@@ -30,6 +32,10 @@ import java.util.regex.Pattern
 import javax.swing.JTextArea
 
 private val compactJson = Json { explicitNulls = false }
+
+/** Preview a secret (cookie/token) without printing it whole: first chars + length. */
+private fun maskSecret(s: String): String =
+    if (s.length <= 12) "${s.take(4)}…(${s.length})" else "${s.take(10)}…(${s.length})"
 
 private fun truncateIfNeeded(serialized: String): String {
     return if (serialized.length > 5000) {
@@ -276,7 +282,8 @@ fun Server.registerTools(
     config: McpConfig,
     interceptManager: InterceptManager,
     approvals: PendingApprovalManager,
-    requestHistory: McpRequestHistory
+    requestHistory: McpRequestHistory,
+    sessionStore: SessionStore
 ) {
 
     // 1. send_http1_request
@@ -807,6 +814,160 @@ fun Server.registerTools(
         val response = api.http().sendRequest(request, opts)
         requestHistory.record(response?.request() ?: request, response?.response(), "replay")
         buildString {
+            appendLine("=== SENT REQUEST ===")
+            appendLine(request.toString())
+            appendLine()
+            appendLine("=== RESPONSE ===")
+            append(response?.response()?.toString() ?: "<no response>")
+        }
+    }
+
+    // ── Session broker: capture per-role sessions, replay captured requests AS a role ──────────
+
+    mcpTool<SessionCapture>(
+        "Capture a principal's live session from proxy history and store it under <role> for later " +
+        "replay-as-role — the core primitive for concurrent multi-principal / IDOR testing without " +
+        "re-login or a device. Provide EITHER `id` (a specific proxy history item to snapshot) OR " +
+        "`host` (snapshots the MOST RECENT request seen to that host). Captures the request's Cookie + " +
+        "Authorization headers, plus any `headerNames` you list (e.g. a bearer/session-token header the " +
+        "app carries outside Authorization). Persisted in the Burp project file (banked roles survive " +
+        "restarts) and shown in the MCP 'Sessions' tab. Drive each principal's login once, capture it, " +
+        "then use session_replay_as."
+    ) {
+        val item = when {
+            id != null -> api.proxy().history().firstOrNull { it.id() == id }
+                ?: return@mcpTool "No history item found with ID: $id"
+            host != null -> api.proxy().history().lastOrNull { hi ->
+                val req = (try { hi.finalRequest() } catch (_: Exception) { null } ?: hi.request())
+                req?.httpService()?.host()?.contains(host, ignoreCase = true) == true
+            } ?: return@mcpTool "No proxy history request found for a host containing: $host"
+            else -> return@mcpTool "Error: provide either `id` (history item) or `host` to capture from."
+        }
+        val req = (try { item.finalRequest() } catch (_: Exception) { null } ?: item.request())
+            ?: return@mcpTool "History item ${item.id()} has no request to capture."
+
+        val extra = LinkedHashMap<String, String>()
+        headerNames?.forEach { name ->
+            val v = req.headerValue(name)
+            if (v != null) extra[name] = v
+        }
+        val session = CapturedSession(
+            role = role,
+            host = req.httpService().host(),
+            cookie = req.headerValue("Cookie"),
+            authorization = req.headerValue("Authorization"),
+            extraHeaders = extra,
+            capturedAt = System.currentTimeMillis(),
+            sourceId = item.id(),
+            note = note
+        )
+        sessionStore.put(session)
+        api.logging().logToOutput("MCP session captured for role '$role' from ${session.host} (item ${item.id()})")
+        buildString {
+            appendLine("Captured session for role '$role' from ${session.host} (proxy history item ${item.id()}).")
+            appendLine("  Cookie: ${session.cookie?.let { maskSecret(it) } ?: "<none>"}")
+            appendLine("  Authorization: ${if (session.authorization != null) "present" else "<none>"}")
+            if (extra.isNotEmpty()) appendLine("  extra headers: ${extra.keys.joinToString(", ")}")
+            if (session.cookie == null && session.authorization == null && extra.isEmpty())
+                appendLine("  WARNING: no Cookie/Authorization/named headers found on that request — nothing to replay.")
+            append("Now use session_replay_as with role='$role' to send captured requests AS this principal.")
+        }
+    }
+
+    mcpTool("session_list", "List the roles that currently have a captured session (role, host, age, cookie preview).") {
+        val list = sessionStore.list()
+        if (list.isEmpty()) {
+            "No sessions captured yet. Drive a principal's login, then session_capture(role, id|host)."
+        } else {
+            list.joinToString("\n") { s ->
+                val age = (System.currentTimeMillis() - s.capturedAt) / 1000
+                "${s.role}  host=${s.host}  age=${age}s  cookie=${s.cookie?.let { maskSecret(it) } ?: "-"}  " +
+                    "auth=${if (s.authorization != null) "y" else "n"}  extra=[${s.extraHeaders.keys.joinToString(",")}]"
+            }
+        }
+    }
+
+    mcpTool<SessionGet>(
+        "Return the stored session material for <role> (Cookie + Authorization + extra headers) so you can " +
+        "attach it to your own requests. Prefer session_replay_as to replay a captured request AS a role."
+    ) {
+        val s = sessionStore.get(role)
+            ?: return@mcpTool "No session stored for role '$role'. Capture it first with session_capture(role, id|host)."
+        buildString {
+            appendLine("role: ${s.role}")
+            appendLine("host: ${s.host}")
+            if (s.cookie != null) appendLine("Cookie: ${s.cookie}")
+            if (s.authorization != null) appendLine("Authorization: ${s.authorization}")
+            s.extraHeaders.forEach { (k, v) -> appendLine("$k: $v") }
+        }
+    }
+
+    mcpTool<SessionReplayAs>(
+        "Replay a captured proxy history request (by `id`) AS a different principal: swaps in <role>'s stored " +
+        "Cookie/Authorization/session headers (from session_capture), then applies optional mutations " +
+        "(setHeaders, updateParams type url|body|cookie, setBody, setPath, setMethod, retargetHost/Port/Tls), " +
+        "and sends it. This is the IDOR/authz primitive — e.g. replay owner_a's object-fetch AS tenant_b and " +
+        "check whether the backend leaks a's data to b. Returns the exact request sent and the response."
+    ) {
+        val decision = checkHistoryPermission("HTTP", config, approvals)
+        if (decision is ApprovalDecision.Deny) return@mcpTool decision.reason
+
+        val session = sessionStore.get(role)
+            ?: return@mcpTool "No session stored for role '$role'. Capture it first with session_capture(role, id|host)."
+
+        val item = api.proxy().history().firstOrNull { it.id() == id }
+            ?: return@mcpTool "No history item found with ID: $id"
+        var request = (try { item.finalRequest() } catch (_: Exception) { null } ?: item.request())
+            ?: return@mcpTool "History item $id has no request"
+
+        // Retarget first so raw rebuilds and downstream mutations keep the new service.
+        if (retargetHost != null || retargetPort != null || retargetTls != null) {
+            val svc = request.httpService()
+            request = request.withService(
+                HttpService.httpService(retargetHost ?: svc.host(), retargetPort ?: svc.port(), retargetTls ?: svc.secure())
+            )
+        }
+
+        // Inject the role's session — the whole point of the tool.
+        if (session.cookie != null) request = request.withUpdatedHeader("Cookie", session.cookie)
+        if (session.authorization != null) request = request.withUpdatedHeader("Authorization", session.authorization)
+        session.extraHeaders.forEach { (k, v) -> request = request.withUpdatedHeader(k, v) }
+
+        // Optional user mutations (after the swap so they can override a session header if needed).
+        if (setMethod != null) request = request.withMethod(setMethod)
+        if (setPath != null) request = request.withPath(setPath)
+        if (setBody != null) request = request.withBody(setBody)
+        setHeaders?.forEach { (k, v) -> request = request.withUpdatedHeader(k, v) }
+        updateParams?.forEach { p ->
+            val type = when (p.type.lowercase()) {
+                "url" -> HttpParameterType.URL
+                "body" -> HttpParameterType.BODY
+                "cookie" -> HttpParameterType.COOKIE
+                else -> return@mcpTool "Error: unknown param type '${p.type}' (use url|body|cookie)"
+            }
+            request = request.withParameter(HttpParameter.parameter(p.name, p.value, type))
+        }
+
+        var opts = RequestOptions.requestOptions()
+        if (httpMode != null) {
+            val mode = try { HttpMode.valueOf(httpMode.uppercase()) } catch (_: Exception) {
+                return@mcpTool "Error: invalid httpMode '$httpMode' (AUTO|HTTP_1|HTTP_2|HTTP_2_IGNORE_ALPN)"
+            }
+            opts = opts.withHttpMode(mode)
+        }
+        if (redirectionMode != null) {
+            val rm = try { RedirectionMode.valueOf(redirectionMode.uppercase()) } catch (_: Exception) {
+                return@mcpTool "Error: invalid redirectionMode '$redirectionMode' (ALWAYS|NEVER|SAME_HOST|IN_SCOPE)"
+            }
+            opts = opts.withRedirectionMode(rm)
+        }
+        if (responseTimeoutMs != null) opts = opts.withResponseTimeout(responseTimeoutMs)
+
+        api.logging().logToOutput("MCP replay of history item $id AS role '$role' -> ${request.httpService().host()}")
+        val response = api.http().sendRequest(request, opts)
+        requestHistory.record(response?.request() ?: request, response?.response(), "replay-as:$role")
+        buildString {
+            appendLine("=== REPLAYED history item $id AS role '$role' ===")
             appendLine("=== SENT REQUEST ===")
             appendLine(request.toString())
             appendLine()

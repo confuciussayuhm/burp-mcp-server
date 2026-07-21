@@ -4,6 +4,7 @@ import burp.api.montoya.MontoyaApi
 import burp.mcp.approval.PendingApprovalManager
 import burp.mcp.history.McpRequestHistory
 import burp.mcp.intercept.InterceptManager
+import burp.mcp.session.SessionStore
 import burp.mcp.tools.registerTools
 import io.ktor.http.*
 import io.ktor.server.application.*
@@ -31,7 +32,8 @@ class McpServer(
     private val config: McpConfig,
     private val interceptManager: InterceptManager,
     private val approvals: PendingApprovalManager,
-    private val requestHistory: McpRequestHistory
+    private val requestHistory: McpRequestHistory,
+    private val sessionStore: SessionStore
 ) {
 
     private var server: EmbeddedServer<*, *>? = null
@@ -84,7 +86,7 @@ class McpServer(
                                     tools = ServerCapabilities.Tools(listChanged = false)
                                 )
                             )
-                        ).also { it.registerTools(api, config, interceptManager, approvals, requestHistory) }
+                        ).also { it.registerTools(api, config, interceptManager, approvals, requestHistory, sessionStore) }
                     }
 
                     routing {
