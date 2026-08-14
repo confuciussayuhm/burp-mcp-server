@@ -256,6 +256,25 @@ data class SessionCapture(
 data class SessionGet(val role: String)
 
 @Serializable
+data class SessionKeepAlive(
+    val role: String,
+    val script: String? = null,
+    val language: String = "groovy",
+    val intervalSec: Int = 180,
+    val enabled: Boolean = true,
+)
+
+@Serializable
+data class SessionAttach(
+    val role: String,
+    val host: String? = null,
+    val headerName: String = "X-Cid",
+    val token: String? = null,
+    val serialize: Boolean = true,
+    val enabled: Boolean = true,
+)
+
+@Serializable
 data class SessionReplayAs(
     val role: String,
     val id: Int,

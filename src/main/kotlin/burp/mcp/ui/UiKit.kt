@@ -269,6 +269,16 @@ object UiKit {
                 state[0] = !state[0]
                 header.text = formatDisclosure(title, state[0])
                 content.isVisible = state[0]
+                // A revalidate() raised inside hidden content is dropped (RepaintManager stops at
+                // an invisible ancestor) but its invalidate() half still propagates, so the chain
+                // above us is left invalid-but-unscheduled with collapsed geometry cached in the
+                // enclosing BoxLayouts. invalidate() short-circuits on an already-invalid
+                // component, so walk the chain explicitly or the content expands to height 0.
+                var c: java.awt.Container? = wrap
+                while (c != null) {
+                    c.invalidate()
+                    c = c.parent
+                }
                 wrap.revalidate()
                 wrap.repaint()
             }

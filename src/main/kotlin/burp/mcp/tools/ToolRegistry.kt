@@ -15,16 +15,19 @@ import burp.api.montoya.http.message.params.HttpParameterType
 import burp.api.montoya.http.message.requests.HttpRequest
 import burp.mcp.McpConfig
 import burp.mcp.approval.ApprovalDecision
-import burp.mcp.approval.ApprovalKind
-import burp.mcp.approval.PendingApprovalManager
+import burp.mcp.approval.ApprovalPolicy
 import burp.mcp.history.McpRequestHistory
 import burp.mcp.history.McpRequestRecord
 import burp.mcp.intercept.InterceptManager
 import burp.mcp.intercept.MessageResolution
 import burp.mcp.intercept.PendingRequest
 import burp.mcp.intercept.PendingResponse
+import burp.mcp.session.AttachSpec
 import burp.mcp.session.CapturedSession
+import burp.mcp.session.KeepAliveSpec
 import burp.mcp.session.SessionStore
+import burp.mcp.session.parseSetCookie
+import burp.mcp.session.rollForwardCookies
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import kotlinx.serialization.json.Json
 import java.awt.KeyboardFocusManager
@@ -37,34 +40,7 @@ private val compactJson = Json { explicitNulls = false }
 private fun maskSecret(s: String): String =
     if (s.length <= 12) "${s.take(4)}…(${s.length})" else "${s.take(10)}…(${s.length})"
 
-/** Parse the `name=value` from a `Set-Cookie` header value, ignoring the attributes after the first `;`. */
-private fun parseSetCookie(setCookie: String): Pair<String, String>? {
-    val first = setCookie.substringBefore(';').trim()
-    val eq = first.indexOf('=')
-    if (eq <= 0) return null
-    return first.substring(0, eq).trim() to first.substring(eq + 1).trim()
-}
-
-/**
- * Roll a role's stored `Cookie` header forward using the `Set-Cookie` values from a response, so a
- * target that ROTATES its session token on every response can be
- * replayed multi-step without 401ing after the first request. Existing cookies are kept; rotated names
- * are overwritten; a cookie set to empty / `deleted` is dropped. Name-based merge (not Burp's global
- * jar) so concurrent principals never collide — each role owns its own cookie set.
- */
-private fun rollForwardCookies(current: String?, setCookies: List<String>): String {
-    val jar = LinkedHashMap<String, String>()
-    current?.split(";")?.forEach { part ->
-        val eq = part.indexOf('=')
-        if (eq > 0) jar[part.substring(0, eq).trim()] = part.substring(eq + 1).trim()
-    }
-    for (sc in setCookies) {
-        parseSetCookie(sc)?.let { (name, value) ->
-            if (value.isEmpty() || value.equals("deleted", ignoreCase = true)) jar.remove(name) else jar[name] = value
-        }
-    }
-    return jar.entries.joinToString("; ") { "${it.key}=${it.value}" }
-}
+// parseSetCookie / rollForwardCookies moved to burp.mcp.session.CookieRoll (shared with KeepAliveManager).
 
 private fun truncateIfNeeded(serialized: String): String {
     return if (serialized.length > 5000) {
@@ -200,104 +176,6 @@ private fun filterMcpHistory(
     return seq
 }
 
-private fun isAutoApprovedTarget(hostname: String, port: Int, config: McpConfig): Boolean {
-    return config.getAutoApproveTargetsList().any { approved ->
-        when {
-            approved.equals("$hostname:$port", ignoreCase = true) -> true
-            approved.equals(hostname, ignoreCase = true) -> true
-            approved.startsWith("*.") -> {
-                val domain = approved.substring(2)
-                hostname.endsWith(".$domain", ignoreCase = true)
-            }
-            else -> false
-        }
-    }
-}
-
-private fun isInBurpScope(hostname: String, port: Int, secure: Boolean, api: MontoyaApi): Boolean {
-    val primaryScheme = if (secure) "https" else "http"
-    val otherScheme = if (secure) "http" else "https"
-    val candidates = listOf(
-        "$primaryScheme://$hostname:$port/",
-        "$primaryScheme://$hostname/",
-        "$otherScheme://$hostname:$port/",
-        "$otherScheme://$hostname/"
-    )
-    for (url in candidates) {
-        try {
-            if (api.scope().isInScope(url)) {
-                api.logging().logToOutput("MCP scope auto-approve matched: $url")
-                return true
-            }
-        } catch (e: Exception) {
-            api.logging().logToOutput("MCP scope check error for $url: ${e.message}")
-        }
-    }
-    return false
-}
-
-private fun checkHttpRequestPermission(
-    hostname: String,
-    port: Int,
-    secure: Boolean,
-    config: McpConfig,
-    preview: String,
-    api: MontoyaApi,
-    approvals: PendingApprovalManager
-): ApprovalDecision {
-    if (!config.requireHttpRequestApproval) return ApprovalDecision.Allow
-    if (isAutoApprovedTarget(hostname, port, config)) return ApprovalDecision.Allow
-    if (config.useBurpScopeForApproval && isInBurpScope(hostname, port, secure, api)) {
-        return ApprovalDecision.Allow
-    }
-    if (config.autoApproveAllNewTargets) {
-        config.addAutoApproveTarget("$hostname:$port")
-        return ApprovalDecision.Allow
-    }
-
-    val pending = approvals.enqueue(ApprovalKind.HTTP_REQUEST, hostname, port, preview)
-    val idStr = pending?.id ?: "(queue full)"
-    val reason = buildString {
-        append("Target `$hostname:$port` is not approved for MCP access. ")
-        append("A pending approval has been queued (id $idStr). ")
-        append("Approve it by: (1) opening Burp → MCP → Approvals tab and clicking Approve, ")
-        append("(2) right-clicking the host in Proxy History → \"MCP: Auto-approve target\", ")
-        append("or (3) adding `$hostname` (or `*.$hostname`) under MCP → Settings → Auto-approved Targets. ")
-        append("Then retry the tool call.")
-    }
-    return ApprovalDecision.Deny(reason, pending?.id)
-}
-
-private fun checkHistoryPermission(
-    historyType: String,
-    config: McpConfig,
-    approvals: PendingApprovalManager
-): ApprovalDecision {
-    if (!config.requireHistoryAccessApproval) return ApprovalDecision.Allow
-    if (config.autoApproveAllNewTargets) return ApprovalDecision.Allow
-
-    val alwaysAllowed = when (historyType) {
-        "HTTP" -> config.alwaysAllowHttpHistory
-        "WebSocket" -> config.alwaysAllowWebSocketHistory
-        else -> false
-    }
-    if (alwaysAllowed) return ApprovalDecision.Allow
-
-    val kind = when (historyType) {
-        "HTTP" -> ApprovalKind.HTTP_HISTORY
-        "WebSocket" -> ApprovalKind.WEBSOCKET_HISTORY
-        else -> ApprovalKind.HTTP_HISTORY
-    }
-    val preview = "An MCP client is requesting access to your Burp Suite $historyType history. " +
-        "This may include sensitive data from previous web sessions."
-    val pending = approvals.enqueue(kind, null, null, preview)
-    val idStr = pending?.id ?: "(queue full)"
-    val reason = "Access to $historyType history is not approved for MCP. " +
-        "A pending approval has been queued (id $idStr). " +
-        "Approve it in Burp → MCP → Approvals to set 'Always allow $historyType history', then retry."
-    return ApprovalDecision.Deny(reason, pending?.id)
-}
-
 private fun getActiveEditor(api: MontoyaApi): JTextArea? {
     val frame = api.userInterface().swingUtils().suiteFrame()
     val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
@@ -310,17 +188,15 @@ fun Server.registerTools(
     api: MontoyaApi,
     config: McpConfig,
     interceptManager: InterceptManager,
-    approvals: PendingApprovalManager,
+    policy: ApprovalPolicy,
     requestHistory: McpRequestHistory,
     sessionStore: SessionStore
 ) {
 
     // 1. send_http1_request
     mcpTool<SendHttp1Request>("Issues an HTTP/1.1 request and returns the response.") {
-        when (val decision = checkHttpRequestPermission(
-            targetHostname, targetPort, usesHttps, config, content, api, approvals
-        )) {
-            ApprovalDecision.Allow -> { /* fall through */ }
+        when (val decision = policy.checkHttpRequest(targetHostname, targetPort, usesHttps, content)) {
+            is ApprovalDecision.Allow -> { /* fall through */ }
             is ApprovalDecision.Deny -> {
                 api.logging().logToOutput(
                     "MCP HTTP request pending approval: $targetHostname:$targetPort (${decision.pendingId})"
@@ -348,10 +224,8 @@ fun Server.registerTools(
             if (requestBody.isNotBlank()) { appendLine(); append(requestBody) }
         }
 
-        when (val decision = checkHttpRequestPermission(
-            targetHostname, targetPort, usesHttps, config, http2RequestDisplay, api, approvals
-        )) {
-            ApprovalDecision.Allow -> { /* fall through */ }
+        when (val decision = policy.checkHttpRequest(targetHostname, targetPort, usesHttps, http2RequestDisplay)) {
+            is ApprovalDecision.Allow -> { /* fall through */ }
             is ApprovalDecision.Deny -> {
                 api.logging().logToOutput(
                     "MCP HTTP request pending approval: $targetHostname:$targetPort (${decision.pendingId})"
@@ -497,7 +371,7 @@ fun Server.registerTools(
 
     // 18. get_proxy_http_history (paginated)
     mcpPaginatedTool<GetProxyHttpHistory>(httpHistoryDescription) {
-        val decision = checkHistoryPermission("HTTP", config, approvals)
+        val decision = policy.checkHistory("HTTP")
         if (decision is ApprovalDecision.Deny) return@mcpPaginatedTool sequenceOf(decision.reason)
         filterProxyHistory(api.proxy().history(), statusCodes, methods, host, mimeTypes, inScopeOnly == true)
             .map { truncateIfNeeded(compactJson.encodeToString(it.toSerializableProxyForm(
@@ -509,7 +383,7 @@ fun Server.registerTools(
     mcpPaginatedTool<GetProxyHttpHistoryRegex>(
         "Searches proxy HTTP history by regex on full request/response content, with the same filtering and output options as get_proxy_http_history."
     ) {
-        val decision = checkHistoryPermission("HTTP", config, approvals)
+        val decision = policy.checkHistory("HTTP")
         if (decision is ApprovalDecision.Deny) return@mcpPaginatedTool sequenceOf(decision.reason)
         val compiledRegex = Pattern.compile(regex)
         filterProxyHistory(api.proxy().history { it.contains(compiledRegex) }, statusCodes, methods, host, mimeTypes, inScopeOnly == true)
@@ -526,7 +400,7 @@ fun Server.registerTools(
         "The base request/response fields always show: request = original from client, response = final delivered to client. " +
         "Use get_proxy_http_history first to browse items and find IDs."
     ) {
-        val decision = checkHistoryPermission("HTTP", config, approvals)
+        val decision = policy.checkHistory("HTTP")
         if (decision is ApprovalDecision.Deny) return@mcpTool decision.reason
         val item = api.proxy().history().firstOrNull { it.id() == id }
             ?: return@mcpTool "No history item found with ID: $id"
@@ -547,6 +421,8 @@ fun Server.registerTools(
 
     // 19c. get_mcp_request_history (paginated)
     mcpPaginatedTool<GetMcpRequestHistory>(mcpRequestHistoryDescription) {
+        val decision = policy.checkHistory("HTTP")
+        if (decision is ApprovalDecision.Deny) return@mcpPaginatedTool sequenceOf(decision.reason)
         filterMcpHistory(requestHistory.list(), statusCodes, methods, host, mimeTypes, inScopeOnly == true)
             .map { truncateIfNeeded(compactJson.encodeToString(it.toSerializableForm(
                 includeRequestBody != false, includeResponseBody != false, includeHeaders != false
@@ -557,6 +433,8 @@ fun Server.registerTools(
     mcpPaginatedTool<GetMcpRequestHistoryRegex>(
         "Searches the MCP-issued request history by regex on full request/response content, with the same filtering and output options as get_mcp_request_history."
     ) {
+        val decision = policy.checkHistory("HTTP")
+        if (decision is ApprovalDecision.Deny) return@mcpPaginatedTool sequenceOf(decision.reason)
         val compiledRegex = Pattern.compile(regex)
         filterMcpHistory(requestHistory.list(), statusCodes, methods, host, mimeTypes, inScopeOnly == true)
             .filter { record ->
@@ -575,6 +453,8 @@ fun Server.registerTools(
         "Retrieves a single MCP-issued request history item by its ID, with full headers and bodies. " +
         "Use get_mcp_request_history first to browse items and find IDs."
     ) {
+        val decision = policy.checkHistory("HTTP")
+        if (decision is ApprovalDecision.Deny) return@mcpTool decision.reason
         val item = requestHistory.get(id)
             ?: return@mcpTool "No MCP request history item found with ID: $id"
         compactJson.encodeToString(item.toSerializableForm(
@@ -584,7 +464,7 @@ fun Server.registerTools(
 
     // 20. get_proxy_websocket_history (paginated)
     mcpPaginatedTool<GetProxyWebsocketHistory>("Displays items within the proxy WebSocket history") {
-        val decision = checkHistoryPermission("WebSocket", config, approvals)
+        val decision = policy.checkHistory("WebSocket")
         if (decision is ApprovalDecision.Deny) return@mcpPaginatedTool sequenceOf(decision.reason)
         api.proxy().webSocketHistory().asSequence()
             .map { truncateIfNeeded(Json.encodeToString(it.toSerializableForm())) }
@@ -592,7 +472,7 @@ fun Server.registerTools(
 
     // 21. get_proxy_websocket_history_regex (paginated)
     mcpPaginatedTool<GetProxyWebsocketHistoryRegex>("Displays items matching a specified regex within the proxy WebSocket history") {
-        val decision = checkHistoryPermission("WebSocket", config, approvals)
+        val decision = policy.checkHistory("WebSocket")
         if (decision is ApprovalDecision.Deny) return@mcpPaginatedTool sequenceOf(decision.reason)
         val compiledRegex = Pattern.compile(regex)
         api.proxy().webSocketHistory { it.contains(compiledRegex) }.asSequence()
@@ -603,6 +483,8 @@ fun Server.registerTools(
     if (api.burpSuite().version().edition() == BurpSuiteEdition.PROFESSIONAL) {
         // 22. get_scanner_issues (paginated)
         mcpPaginatedTool<GetScannerIssues>("Displays information about issues identified by the scanner") {
+            val decision = policy.checkHistory("HTTP")
+            if (decision is ApprovalDecision.Deny) return@mcpPaginatedTool sequenceOf(decision.reason)
             api.siteMap().issues().asSequence().map { Json.encodeToString(it.toSerializableForm()) }
         }
 
@@ -779,7 +661,7 @@ fun Server.registerTools(
         "retargetHost/retargetPort/retargetTls. Control transport with httpMode (AUTO|HTTP_1|HTTP_2|HTTP_2_IGNORE_ALPN), " +
         "sni, redirectionMode (ALWAYS|NEVER|SAME_HOST|IN_SCOPE), responseTimeoutMs. Returns the exact request sent and the response."
     ) {
-        val decision = checkHistoryPermission("HTTP", config, approvals)
+        val decision = policy.checkHistory("HTTP")
         if (decision is ApprovalDecision.Deny) return@mcpTool decision.reason
 
         val item = api.proxy().history().firstOrNull { it.id() == id }
@@ -839,7 +721,15 @@ fun Server.registerTools(
         }
         if (responseTimeoutMs != null) opts = opts.withResponseTimeout(responseTimeoutMs)
 
-        api.logging().logToOutput("MCP replay of history item $id -> ${request.httpService().host()}")
+        // Gate on the service this will ACTUALLY reach: retargetHost/Port/Tls can point a
+        // history item at a host the user never approved.
+        val sendService = request.httpService()
+        val sendDecision = policy.checkHttpRequest(
+            sendService.host(), sendService.port(), sendService.secure(), request.toString()
+        )
+        if (sendDecision is ApprovalDecision.Deny) return@mcpTool sendDecision.reason
+
+        api.logging().logToOutput("MCP replay of history item $id -> ${sendService.host()}")
         val response = api.http().sendRequest(request, opts)
         requestHistory.record(response?.request() ?: request, response?.response(), "replay")
         buildString {
@@ -863,6 +753,8 @@ fun Server.registerTools(
         "restarts) and shown in the MCP 'Sessions' tab. Drive each principal's login once, capture it, " +
         "then use session_replay_as."
     ) {
+        val decision = policy.checkHistory("HTTP")
+        if (decision is ApprovalDecision.Deny) return@mcpTool decision.reason
         val item = when {
             id != null -> api.proxy().history().firstOrNull { it.id() == id }
                 ?: return@mcpTool "No history item found with ID: $id"
@@ -920,6 +812,8 @@ fun Server.registerTools(
         "Return the stored session material for <role> (Cookie + Authorization + extra headers) so you can " +
         "attach it to your own requests. Prefer session_replay_as to replay a captured request AS a role."
     ) {
+        val decision = policy.checkHistory("HTTP")
+        if (decision is ApprovalDecision.Deny) return@mcpTool decision.reason
         val s = sessionStore.get(role)
             ?: return@mcpTool "No session stored for role '$role'. Capture it first with session_capture(role, id|host)."
         buildString {
@@ -940,9 +834,13 @@ fun Server.registerTools(
         "target that rotates its session token per response, <role>'s stored cookie is rolled forward from the " +
         "response Set-Cookie, so multi-step replay chains keep working instead of 401ing after the first request."
     ) {
-        val decision = checkHistoryPermission("HTTP", config, approvals)
+        val decision = policy.checkHistory("HTTP")
         if (decision is ApprovalDecision.Deny) return@mcpTool decision.reason
 
+        // Serialize the whole read -> send -> roll-forward per role: two concurrent replays of the same
+        // role would both read the same stored cookie, letting the store fall >=2 rotations behind the
+        // server — which on a rotate-and-wipe-on-stale target WIPES the session for every consumer.
+        return@mcpTool sessionStore.withGate(role) {
         val session = sessionStore.get(role)
             ?: return@mcpTool "No session stored for role '$role'. Capture it first with session_capture(role, id|host)."
 
@@ -994,7 +892,15 @@ fun Server.registerTools(
         }
         if (responseTimeoutMs != null) opts = opts.withResponseTimeout(responseTimeoutMs)
 
-        api.logging().logToOutput("MCP replay of history item $id AS role '$role' -> ${request.httpService().host()}")
+        // Gate on the service this will ACTUALLY reach: retargetHost/Port/Tls can point a
+        // history item at a host the user never approved.
+        val sendService = request.httpService()
+        val sendDecision = policy.checkHttpRequest(
+            sendService.host(), sendService.port(), sendService.secure(), request.toString()
+        )
+        if (sendDecision is ApprovalDecision.Deny) return@mcpTool sendDecision.reason
+
+        api.logging().logToOutput("MCP replay of history item $id AS role '$role' -> ${sendService.host()}")
         val response = api.http().sendRequest(request, opts)
         requestHistory.record(response?.request() ?: request, response?.response(), "replay-as:$role")
 
@@ -1023,6 +929,7 @@ fun Server.registerTools(
             }
         }
 
+        sessionStore.touchActivity(role)
         buildString {
             appendLine("=== REPLAYED history item $id AS role '$role'$rolledNote ===")
             appendLine("=== SENT REQUEST ===")
@@ -1030,6 +937,82 @@ fun Server.registerTools(
             appendLine()
             appendLine("=== RESPONSE ===")
             append(response?.response()?.toString() ?: "<no response>")
+        }
+        }
+    }
+
+    // 31b. session_keepalive — per-role scripted keepalive, run under the role's replay lock
+    mcpTool<SessionKeepAlive>(
+        "Register (or update / disable) a per-role KEEPALIVE for a captured session: a script the burp-mcp " +
+        "runs on a timer, under the role's replay lock, to keep a session that expires when idle (or whose " +
+        "token rotates each response) valid without acting as a concurrent second caller. The `script` " +
+        "(language default 'groovy'; any JSR-223 engine on Burp's classpath) receives `ctx`: ctx.session " +
+        "(host/cookie/authorization), ctx.send(method, path[, headers][, body]) -> {status, location, " +
+        "setCookies, headers, body} sent as the role (redirects not followed), ctx.rollForward(setCookies), " +
+        "ctx.setCookie(header), ctx.markDead(reason), ctx.log(msg). Runs every `intervalSec` (default 180) " +
+        "only when the role has not been replayed within that window, so it never overlaps live traffic. " +
+        "enabled=false or an omitted script disables it."
+    ) {
+        if (!enabled || script == null) {
+            val removed = sessionStore.removeKeepAlive(role)
+            return@mcpTool if (removed != null) "Keepalive disabled + removed for role '$role'."
+            else "No keepalive was registered for role '$role'."
+        }
+        // The keepalive fires on a timer with no tool call behind it, so this is the only
+        // chance to check the target. Port/TLS are not stored with a session, so gate on host.
+        val keepAliveHost = sessionStore.get(role)?.host
+            ?: return@mcpTool "No session stored for role '$role'. Capture it first with session_capture(role, id|host)."
+        val gateDecision = policy.checkHttpRequest(
+            keepAliveHost, null, true,
+            "A keepalive script for role '$role' will send requests to $keepAliveHost every ${intervalSec}s."
+        )
+        if (gateDecision is ApprovalDecision.Deny) return@mcpTool gateDecision.reason
+
+        sessionStore.putKeepAlive(
+            KeepAliveSpec(role = role, language = language, script = script, intervalMs = intervalSec.toLong() * 1000L, enabled = true)
+        )
+        "Keepalive registered for role '$role' (language=$language, every ${intervalSec}s), run under the " +
+            "role's serial replay lock. It fires only when '$role' has not been replayed within ${intervalSec}s."
+    }
+
+    // 31c. session_attach — inject a role's session into a marked browser routed through Burp
+    mcpTool<SessionAttach>(
+        "Attach a captured role's session to a live browser routed through Burp: requests to the role's " +
+        "host carrying the opaque marker header (name default 'X-Cid'; value is a generated neutral token, " +
+        "no role or project name) get the role's CURRENT stored Cookie/Authorization injected and the " +
+        "response rolled forward — so a browser and the `session_replay_as` API share ONE coherent session " +
+        "instead of diverging. Returns the header name + token to set as Playwright `extraHTTPHeaders`; the " +
+        "token also tags that browser's traffic in Burp (annotation note) so concurrent browsers are " +
+        "distinguishable, and the marker header is stripped before the request reaches the target. " +
+        "`serialize` (default true) gates the role's requests one at a time through the per-role semaphore. " +
+        "`enabled=false` detaches (by token if given, else all attaches for the role)."
+    ) {
+        if (!enabled) {
+            if (token != null) {
+                val r = sessionStore.removeAttach(token)
+                return@mcpTool if (r != null) "Detached token (role '${r.role}')." else "No attach found for that token."
+            }
+            val removed = sessionStore.attaches().filter { it.role == role }.count { sessionStore.removeAttach(it.token) != null }
+            return@mcpTool "Detached $removed attach(es) for role '$role'."
+        }
+        val s = sessionStore.get(role)
+            ?: return@mcpTool "No session stored for role '$role'. Capture it first with session_capture(role, id|host)."
+        // Attaching arms credential injection for future browser traffic to this host, so gate it
+        // the same way as the tools that send directly. Port/TLS are not stored with a session.
+        val attachDecision = policy.checkHttpRequest(
+            host ?: s.host, null, true,
+            "Attach role '$role''s session to browser traffic reaching ${host ?: s.host}."
+        )
+        if (attachDecision is ApprovalDecision.Deny) return@mcpTool attachDecision.reason
+        val tok = token ?: java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 16)
+        val h = host ?: s.host
+        sessionStore.putAttach(AttachSpec(token = tok, role = role, host = h, headerName = headerName, serialize = serialize))
+        buildString {
+            appendLine("Attached role '$role' to browsers carrying:  $headerName: $tok")
+            appendLine("Set that as a Playwright extraHTTPHeaders entry on the browser (routed through this Burp).")
+            appendLine("Requests to $h with it get '$role''s session injected + rolled forward" +
+                (if (serialize) ", serialized one-at-a-time per role." else " (not serialized)."))
+            append("The token also tags this browser's traffic in Burp. Detach: session_attach role=$role enabled=false.")
         }
     }
 
@@ -1039,7 +1022,7 @@ fun Server.registerTools(
         "untruncated and including the request start-line the split headers/body fields drop. Use this to " +
         "get an exact request to hand to send_http1_request, or use replay_proxy_history_item to mutate + resend."
     ) {
-        val decision = checkHistoryPermission("HTTP", config, approvals)
+        val decision = policy.checkHistory("HTTP")
         if (decision is ApprovalDecision.Deny) return@mcpTool decision.reason
         val item = api.proxy().history().firstOrNull { it.id() == id }
             ?: return@mcpTool "No history item found with ID: $id"
@@ -1058,7 +1041,7 @@ fun Server.registerTools(
         "(optionally throttled with throttleMs), and returns per-payload status/length/timing. Unlike " +
         "send_to_intruder (UI only), this executes and returns results. Set httpMode to pin the HTTP version."
     ) {
-        val decision = checkHistoryPermission("HTTP", config, approvals)
+        val decision = policy.checkHistory("HTTP")
         if (decision is ApprovalDecision.Deny) return@mcpTool decision.reason
         if (marker.isEmpty()) return@mcpTool "Error: marker must be non-empty."
         if (payloads.isEmpty()) return@mcpTool "Error: payloads list is empty."
@@ -1081,6 +1064,12 @@ fun Server.registerTools(
         val baseRaw = base.toString()
         if (!baseRaw.contains(marker)) return@mcpTool "Error: marker '$marker' not present in the base request."
         val service = base.httpService()
+        // One gate for the whole batch: every payload goes to this same service.
+        val sendDecision = policy.checkHttpRequest(
+            service.host(), service.port(), service.secure(), baseRaw
+        )
+        if (sendDecision is ApprovalDecision.Deny) return@mcpTool sendDecision.reason
+
         val mode = httpMode?.let { try { HttpMode.valueOf(it.uppercase()) } catch (_: Exception) { null } }
 
         api.logging().logToOutput("MCP intruder_batch: ${payloads.size} payloads -> ${service.host()}")
@@ -1111,7 +1100,7 @@ fun Server.registerTools(
         "Lists endpoints in Burp's site map (populated by browsing/proxying the app), optionally filtered by " +
         "url prefix. Use this instead of re-crawling with curl — it reflects what the real browser already reached."
     ) {
-        val decision = checkHistoryPermission("HTTP", config, approvals)
+        val decision = policy.checkHistory("HTTP")
         if (decision is ApprovalDecision.Deny) return@mcpPaginatedTool sequenceOf(decision.reason)
         api.siteMap().requestResponses().asSequence()
             .filter { rr ->

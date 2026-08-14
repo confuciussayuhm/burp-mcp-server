@@ -18,6 +18,7 @@ dependencies {
     implementation(libs.kotlin.stdlib)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.mcp.kotlin.sdk)
+    implementation(libs.groovy.jsr223)
 }
 
 java {

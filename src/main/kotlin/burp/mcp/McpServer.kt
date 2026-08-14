@@ -1,7 +1,7 @@
 package burp.mcp
 
 import burp.api.montoya.MontoyaApi
-import burp.mcp.approval.PendingApprovalManager
+import burp.mcp.approval.ApprovalPolicy
 import burp.mcp.history.McpRequestHistory
 import burp.mcp.intercept.InterceptManager
 import burp.mcp.session.SessionStore
@@ -31,7 +31,7 @@ class McpServer(
     private val api: MontoyaApi,
     private val config: McpConfig,
     private val interceptManager: InterceptManager,
-    private val approvals: PendingApprovalManager,
+    private val policy: ApprovalPolicy,
     private val requestHistory: McpRequestHistory,
     private val sessionStore: SessionStore
 ) {
@@ -86,7 +86,7 @@ class McpServer(
                                     tools = ServerCapabilities.Tools(listChanged = false)
                                 )
                             )
-                        ).also { it.registerTools(api, config, interceptManager, approvals, requestHistory, sessionStore) }
+                        ).also { it.registerTools(api, config, interceptManager, policy, requestHistory, sessionStore) }
                     }
 
                     routing {

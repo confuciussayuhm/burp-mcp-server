@@ -8,6 +8,7 @@ shadow = "8.3.6"
 kotlinx-serialization = "1.9.0"
 mcp-sdk = "0.8.4"
 burp-montoya = "2025.10"
+groovy = "4.0.24"
 
 [libraries]
 # Kotlin
@@ -27,6 +28,9 @@ mcp-kotlin-sdk = { module = "io.modelcontextprotocol:kotlin-sdk", version.ref = 
 
 # Montoya
 burp-montoya-api = { module = "net.portswigger.burp.extensions:montoya-api", version.ref = "burp-montoya" }
+
+# Groovy — JSR-223 scripting engine for per-role session keepalive scripts
+groovy-jsr223 = { module = "org.apache.groovy:groovy-jsr223", version.ref = "groovy" }
 
 [bundles]
 ktor-server = [

@@ -2,10 +2,13 @@ package burp.mcp
 
 import burp.api.montoya.BurpExtension
 import burp.api.montoya.MontoyaApi
+import burp.mcp.approval.ApprovalPolicy
 import burp.mcp.approval.PendingApprovalManager
 import burp.mcp.history.McpRequestHistory
 import burp.mcp.intercept.InterceptManager
 import burp.mcp.intercept.InterceptTab
+import burp.mcp.session.KeepAliveManager
+import burp.mcp.session.SessionInjector
 import burp.mcp.session.SessionStore
 import burp.mcp.session.SessionsTab
 import javax.swing.JTabbedPane
@@ -20,13 +23,19 @@ class BurpMcpExtension : BurpExtension {
         val interceptManager = InterceptManager(api)
         interceptManager.register()
         val approvals = PendingApprovalManager()
+        val policy = ApprovalPolicy(api, config, approvals)
         val requestHistory = McpRequestHistory(api.persistence().extensionData())
         val sessionStore = SessionStore(api.persistence().extensionData())
+        val keepAliveManager = KeepAliveManager(api, sessionStore)
+        keepAliveManager.start()
+        val sessionInjector = SessionInjector(api, sessionStore)
+        api.http().registerHttpHandler(sessionInjector)
+        sessionInjector.start()
 
-        val server = McpServer(api, config, interceptManager, approvals, requestHistory, sessionStore)
+        val server = McpServer(api, config, interceptManager, policy, requestHistory, sessionStore)
 
         val tabbedPane = JTabbedPane()
-        val serverTab = ServerTab(api, config, server, interceptManager, approvals)
+        val serverTab = ServerTab(api, config, server, interceptManager, approvals, policy)
         val interceptTab = InterceptTab(api, interceptManager)
         val requestLogTab = RequestLogTab(api, requestHistory)
         val sessionsTab = SessionsTab(sessionStore)
@@ -68,7 +77,11 @@ class BurpMcpExtension : BurpExtension {
             sessionsTab.cleanup()
             approvals.removeListener(approvalsBadgeListener)
             serverTab.cleanup()
-            server.stop()
+            sessionInjector.stop()
+            keepAliveManager.stop()
+            // shutdown(), not stop(): stop() leaves the server's single-thread executor alive, so
+            // every extension reload leaked a thread.
+            server.shutdown()
             interceptManager.deregister()
             config.cleanup()
         }
