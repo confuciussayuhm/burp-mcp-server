@@ -24,7 +24,6 @@ import javax.swing.JPanel
 import javax.swing.JScrollPane
 import javax.swing.JSplitPane
 import javax.swing.JTable
-import javax.swing.ListSelectionModel
 import javax.swing.SwingConstants
 import javax.swing.SwingUtilities
 import javax.swing.border.EmptyBorder
@@ -47,6 +46,7 @@ class InterceptTab(
 
     private lateinit var tableModel: MessageTableModel
     private lateinit var table: JTable
+    private lateinit var columnFit: UiKit.ColumnFit
     private lateinit var requestEditor: HttpRequestEditor
     private lateinit var responseEditor: HttpResponseEditor
     private lateinit var editorCards: JPanel
@@ -133,19 +133,18 @@ class InterceptTab(
 
         // ── Table ──────────────────────────────────────────────────
         tableModel = MessageTableModel()
-        table = JTable(tableModel).apply {
-            selectionModel.selectionMode = ListSelectionModel.SINGLE_SELECTION
-            autoResizeMode = JTable.AUTO_RESIZE_LAST_COLUMN
-            rowHeight = 22
-            columnModel.getColumn(0).preferredWidth = 50   // #
-            columnModel.getColumn(1).preferredWidth = 60   // Type
-            columnModel.getColumn(2).preferredWidth = 70   // Method
-            columnModel.getColumn(3).preferredWidth = 150  // Host
-            columnModel.getColumn(4).preferredWidth = 380  // URL / Summary
-            columnModel.getColumn(5).preferredWidth = 80   // Time
+        table = UiKit.dataTable(tableModel).apply {
             columnModel.getColumn(1).cellRenderer = TypeCellRenderer()
             columnModel.getColumn(2).cellRenderer = MethodCellRenderer()
         }
+        val sorter = UiKit.installSorter(table)
+        // Queue ids read "msg-12": compared as text, msg-10 lands above msg-9.
+        sorter.setComparator(0, Comparator<Any?> { a, b ->
+            val x = a?.toString()?.substringAfterLast('-')?.toLongOrNull() ?: Long.MIN_VALUE
+            val y = b?.toString()?.substringAfterLast('-')?.toLongOrNull() ?: Long.MIN_VALUE
+            x.compareTo(y)
+        })
+        columnFit = UiKit.autoFitColumns(table)
         table.selectionModel.addListSelectionListener { e ->
             if (!e.valueIsAdjusting) onSelectionChanged()
         }
@@ -220,34 +219,38 @@ class InterceptTab(
 
         isRefreshing = true
         tableModel.setMessages(messages, fire = !structurallyEqual)
+        if (!structurallyEqual) columnFit.refresh()
         pendingCountLabel.text = "Pending: ${messages.size}"
 
         val selId = selectedMessageId
         if (selId != null) {
-            val row = tableModel.findRowById(selId)
-            if (row >= 0) {
-                if (table.selectedRow != row) {
-                    table.selectionModel.setSelectionInterval(row, row)
-                }
-            } else {
+            val modelRow = tableModel.findRowById(selId)
+            if (modelRow < 0) {
                 selectedMessageId = null
                 clearEditor()
+            } else {
+                val viewRow = table.convertRowIndexToView(modelRow)
+                if (viewRow >= 0 && table.selectedRow != viewRow) {
+                    table.selectionModel.setSelectionInterval(viewRow, viewRow)
+                }
             }
         } else if (autoScroll.isSelected && messages.isNotEmpty()) {
-            table.scrollRectToVisible(table.getCellRect(messages.size - 1, 0, true))
+            // Newest is the last *model* row; a sorted header can put it anywhere in the view.
+            val viewRow = table.convertRowIndexToView(messages.size - 1)
+            if (viewRow >= 0) table.scrollRectToVisible(table.getCellRect(viewRow, 0, true))
         }
         isRefreshing = false
     }
 
     private fun onSelectionChanged() {
         if (isRefreshing) return
-        val row = table.selectedRow
-        if (row < 0) {
+        val viewRow = table.selectedRow
+        if (viewRow < 0) {
             selectedMessageId = null
             clearEditor()
             return
         }
-        val message = tableModel.getMessageAt(row) ?: return
+        val message = tableModel.getMessageAt(table.convertRowIndexToModel(viewRow)) ?: return
         selectedMessageId = message.id
 
         when (message) {
@@ -335,16 +338,12 @@ class InterceptTab(
 
         fun idList(): List<String> = messages.map { it.id }
 
-        fun typeOf(row: Int): MessageType? = getMessageAt(row)?.type
-        fun methodOf(row: Int): String = when (val m = getMessageAt(row)) {
-            is PendingRequest -> m.method
-            is PendingResponse -> m.initiatingRequestMethod
-            null -> ""
-        }
-
         override fun getRowCount(): Int = messages.size
         override fun getColumnCount(): Int = columns.size
         override fun getColumnName(column: Int): String = columns[column]
+
+        override fun getColumnClass(columnIndex: Int): Class<*> =
+            if (columnIndex == 5) UiKit.TimeCell::class.java else String::class.java
 
         override fun getValueAt(rowIndex: Int, columnIndex: Int): Any? {
             val msg = messages.getOrNull(rowIndex) ?: return null
@@ -360,7 +359,7 @@ class InterceptTab(
                     is PendingResponse -> ""
                 }
                 4 -> msg.summary
-                5 -> timeFormat.format(Date(msg.timestamp))
+                5 -> UiKit.TimeCell(msg.timestamp, timeFormat.format(Date(msg.timestamp)))
                 else -> null
             }
         }
@@ -376,10 +375,10 @@ class InterceptTab(
             column: Int
         ): Component {
             super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column)
-            val type = tableModel.typeOf(row)
-            val (glyph, status) = when (type) {
-                MessageType.REQUEST -> "▶ REQ" to UiKit.Status.PENDING
-                MessageType.RESPONSE -> "◀ RES" to UiKit.Status.RUNNING
+            // Off the cell value, not the row index: `row` is a view index once sorting is on.
+            val (glyph, status) = when (value?.toString()) {
+                "REQ" -> "▶ REQ" to UiKit.Status.PENDING
+                "RES" -> "◀ RES" to UiKit.Status.RUNNING
                 else -> "—" to UiKit.Status.NEUTRAL
             }
             text = glyph

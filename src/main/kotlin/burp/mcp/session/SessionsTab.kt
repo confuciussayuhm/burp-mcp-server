@@ -12,7 +12,6 @@ import javax.swing.JScrollPane
 import javax.swing.JSplitPane
 import javax.swing.JTable
 import javax.swing.JTextArea
-import javax.swing.ListSelectionModel
 import javax.swing.border.EmptyBorder
 import javax.swing.table.AbstractTableModel
 
@@ -32,8 +31,12 @@ class SessionsTab(private val store: SessionStore) {
     private var refreshTimer: javax.swing.Timer? = null
     private lateinit var model: SessionTableModel
     private lateinit var table: JTable
+    private lateinit var columnFit: UiKit.ColumnFit
     private lateinit var detail: JTextArea
     private lateinit var countLabel: JLabel
+
+    private var isRefreshing = false
+    private var shown: List<CapturedSession> = emptyList()
 
     fun cleanup() {
         refreshTimer?.stop()
@@ -61,18 +64,12 @@ class SessionsTab(private val store: SessionStore) {
         }
 
         model = SessionTableModel()
-        table = JTable(model).apply {
-            selectionModel.selectionMode = ListSelectionModel.SINGLE_SELECTION
-            autoResizeMode = JTable.AUTO_RESIZE_LAST_COLUMN
-            rowHeight = 22
-            columnModel.getColumn(0).preferredWidth = 140 // Role
-            columnModel.getColumn(1).preferredWidth = 200 // Host
-            columnModel.getColumn(2).preferredWidth = 80  // Captured
-            columnModel.getColumn(3).preferredWidth = 230 // Cookie
-            columnModel.getColumn(4).preferredWidth = 50  // Auth
-            columnModel.getColumn(5).preferredWidth = 160 // Extra
+        table = UiKit.dataTable(model)
+        UiKit.installSorter(table)
+        columnFit = UiKit.autoFitColumns(table)
+        table.selectionModel.addListSelectionListener { e ->
+            if (!e.valueIsAdjusting && !isRefreshing) showDetail()
         }
-        table.selectionModel.addListSelectionListener { e -> if (!e.valueIsAdjusting) showDetail() }
 
         detail = JTextArea().apply {
             isEditable = false
@@ -99,25 +96,42 @@ class SessionsTab(private val store: SessionStore) {
     }
 
     private fun refresh() {
-        val prevRole = table.selectedRow.takeIf { it >= 0 }?.let { model.roleAt(it) }
-        model.setData(store.list())
+        // CapturedSession is a data class, so this catches a re-capture or a rolled cookie while
+        // skipping the common case. Rebuilding regardless would drop the sort, clear the selection
+        // and blank the detail pane once a second.
+        val sessions = store.list()
+        if (sessions == shown) return
+        shown = sessions
+
+        val prevRole = table.selectedRow
+            .takeIf { it >= 0 }
+            ?.let { model.roleAt(table.convertRowIndexToModel(it)) }
+
+        isRefreshing = true
+        model.setData(sessions)
+        columnFit.refresh()
         val n = model.rowCount()
         countLabel.text = "$n role" + if (n == 1) "" else "s"
         if (prevRole != null) {
-            val row = model.rowOfRole(prevRole)
-            if (row >= 0 && table.selectedRow != row) {
-                table.selectionModel.setSelectionInterval(row, row)
+            val modelRow = model.rowOfRole(prevRole)
+            if (modelRow >= 0) {
+                val viewRow = table.convertRowIndexToView(modelRow)
+                if (viewRow >= 0 && table.selectedRow != viewRow) {
+                    table.selectionModel.setSelectionInterval(viewRow, viewRow)
+                }
             }
         }
+        isRefreshing = false
+        showDetail()
     }
 
     private fun showDetail() {
-        val row = table.selectedRow
-        if (row < 0) {
+        val viewRow = table.selectedRow
+        if (viewRow < 0) {
             detail.text = ""
             return
         }
-        val s = model.sessionAt(row) ?: return
+        val s = model.sessionAt(table.convertRowIndexToModel(viewRow)) ?: return
         detail.text = buildString {
             appendLine("role:     ${s.role}")
             appendLine("host:     ${s.host}")
@@ -152,12 +166,15 @@ class SessionsTab(private val store: SessionStore) {
         override fun getColumnCount(): Int = cols.size
         override fun getColumnName(column: Int): String = cols[column]
 
+        override fun getColumnClass(columnIndex: Int): Class<*> =
+            if (columnIndex == 2) UiKit.TimeCell::class.java else String::class.java
+
         override fun getValueAt(rowIndex: Int, columnIndex: Int): Any? {
             val s = rows.getOrNull(rowIndex) ?: return null
             return when (columnIndex) {
                 0 -> s.role
                 1 -> s.host
-                2 -> timeFormat.format(Date(s.capturedAt))
+                2 -> UiKit.TimeCell(s.capturedAt, timeFormat.format(Date(s.capturedAt)))
                 3 -> s.cookie?.let { if (it.length <= 32) it else it.take(30) + "…" } ?: "-"
                 4 -> if (s.authorization != null) "yes" else "-"
                 5 -> s.extraHeaders.keys.joinToString(", ")
