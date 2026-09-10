@@ -4,6 +4,7 @@ import burp.api.montoya.BurpExtension
 import burp.api.montoya.MontoyaApi
 import burp.mcp.approval.ApprovalPolicy
 import burp.mcp.approval.PendingApprovalManager
+import burp.mcp.collab.CollaboratorBroker
 import burp.mcp.history.McpRequestHistory
 import burp.mcp.intercept.InterceptManager
 import burp.mcp.intercept.InterceptTab
@@ -32,7 +33,12 @@ class BurpMcpExtension : BurpExtension {
         api.http().registerHttpHandler(sessionInjector)
         sessionInjector.start()
 
-        val server = McpServer(api, config, interceptManager, policy, requestHistory, sessionStore)
+        // One Collaborator client for the whole extension load. The MCP transport is stateless and
+        // re-registers tools per request, so anything the collaborator tools need to remember between
+        // calls has to be owned out here.
+        val collaborator = CollaboratorBroker(api, api.persistence().extensionData())
+
+        val server = McpServer(api, config, interceptManager, policy, requestHistory, sessionStore, collaborator)
 
         val tabbedPane = JTabbedPane()
         val serverTab = ServerTab(api, config, server, interceptManager, approvals, policy)

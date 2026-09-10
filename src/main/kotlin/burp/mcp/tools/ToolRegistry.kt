@@ -3,7 +3,6 @@ package burp.mcp.tools
 import burp.api.montoya.MontoyaApi
 import burp.api.montoya.burpsuite.TaskExecutionEngine.TaskExecutionEngineState.PAUSED
 import burp.api.montoya.burpsuite.TaskExecutionEngine.TaskExecutionEngineState.RUNNING
-import burp.api.montoya.collaborator.InteractionFilter
 import burp.api.montoya.core.BurpSuiteEdition
 import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.HttpService
@@ -16,6 +15,7 @@ import burp.api.montoya.http.message.requests.HttpRequest
 import burp.mcp.McpConfig
 import burp.mcp.approval.ApprovalDecision
 import burp.mcp.approval.ApprovalPolicy
+import burp.mcp.collab.CollaboratorBroker
 import burp.mcp.history.McpRequestHistory
 import burp.mcp.history.McpRequestRecord
 import burp.mcp.intercept.InterceptManager
@@ -190,7 +190,8 @@ fun Server.registerTools(
     interceptManager: InterceptManager,
     policy: ApprovalPolicy,
     requestHistory: McpRequestHistory,
-    sessionStore: SessionStore
+    sessionStore: SessionStore,
+    collaborator: CollaboratorBroker
 ) {
 
     // 1. send_http1_request
@@ -488,38 +489,49 @@ fun Server.registerTools(
             api.siteMap().issues().asSequence().map { Json.encodeToString(it.toSerializableForm()) }
         }
 
-        val collaboratorClient by lazy { api.collaborator().createClient() }
-
         // 23. generate_collaborator_payload
         mcpTool<GenerateCollaboratorPayload>(
             "Generates a Burp Collaborator payload URL for out-of-band (OOB) testing. " +
             "Use get_collaborator_interactions with the returned payloadId to check for interactions."
         ) {
             api.logging().logToOutput("MCP generating Collaborator payload${customData?.let { " with custom data" } ?: ""}")
-            val payload = if (customData != null) {
-                collaboratorClient.generatePayload(customData)
-            } else {
-                collaboratorClient.generatePayload()
-            }
-            val server = collaboratorClient.server()
-            "Payload: $payload\nPayload ID: ${payload.id()}\nCollaborator server: ${server.address()}"
+            val payload = collaborator.generatePayload(customData)
+            "Payload: $payload\nPayload ID: ${payload.id()}\nCollaborator server: ${collaborator.serverAddress()}"
         }
 
         // 24. get_collaborator_interactions
         mcpTool<GetCollaboratorInteractions>(
             "Polls Burp Collaborator for out-of-band interactions (DNS, HTTP, SMTP). " +
-            "Optionally filter by payloadId from generate_collaborator_payload."
+            "Optionally filter by payloadId from generate_collaborator_payload — the interaction id, " +
+            "the full payload host, or the payload host with injected prefix labels are all accepted. " +
+            "Results are cumulative: every interaction seen for the payload is returned on every call, " +
+            "so a later empty result never retracts a hit an earlier call reported."
         ) {
             api.logging().logToOutput("MCP polling Collaborator interactions${payloadId?.let { " for payload: $it" } ?: ""}")
-            val interactions = if (payloadId != null) {
-                collaboratorClient.getInteractions(InteractionFilter.interactionIdFilter(payloadId))
-            } else {
-                collaboratorClient.getAllInteractions()
-            }
-            if (interactions.isEmpty()) {
-                "No interactions detected"
-            } else {
+            val interactions = collaborator.poll(payloadId)
+            if (interactions.isNotEmpty()) {
                 interactions.joinToString("\n\n") { Json.encodeToString(it.toSerializableForm()) }
+            } else {
+                // Distinguish "polled and nothing came back" from "there was nothing this client
+                // could ever have seen" — an agent chasing a blind injection needs to know which.
+                val tracked = collaborator.trackedPayloads()
+                buildString {
+                    append("No interactions detected")
+                    if (tracked.isEmpty()) {
+                        append(
+                            ". Note that this Collaborator client has not generated any payloads, so it " +
+                            "cannot see interactions for payloads issued elsewhere (Burp's Collaborator tab, " +
+                            "a previous project, or a Collaborator client from before the extension was reloaded). " +
+                            "Call generate_collaborator_payload first and use that payload."
+                        )
+                    } else {
+                        append(" for ")
+                        append(payloadId?.let { "payload '$it'" } ?: "any of the ${tracked.size} payload(s) this client has issued")
+                        append(". Payloads currently tracked: ")
+                        append(tracked.takeLast(10).joinToString(", "))
+                        if (tracked.size > 10) append(" (+${tracked.size - 10} older)")
+                    }
+                }
             }
         }
     }
