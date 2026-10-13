@@ -71,14 +71,14 @@ class InterceptManager(private val api: MontoyaApi) {
 
     fun enable() {
         enabled.set(true)
-        api.logging().logToOutput("MCP intercept enabled")
+        api.logging().logToOutput("Agent intercept enabled")
         notifyStateListeners(true)
     }
 
     fun disable() {
         enabled.set(false)
         store.forwardAll()
-        api.logging().logToOutput("MCP intercept disabled, all pending messages forwarded")
+        api.logging().logToOutput("Agent intercept disabled, all held messages forwarded")
         notifyStateListeners(false)
     }
 
@@ -116,7 +116,7 @@ class InterceptManager(private val api: MontoyaApi) {
             return ProxyRequestReceivedAction.continueWith(interceptedRequest)
         }
 
-        api.logging().logToOutput("MCP intercepted request $id: $method $url")
+        api.logging().logToOutput("Agent intercept holding request $id: $method $url")
 
         return try {
             when (val resolution = future.get(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
@@ -137,11 +137,11 @@ class InterceptManager(private val api: MontoyaApi) {
             }
         } catch (_: TimeoutException) {
             store.removeMessage(id)
-            api.logging().logToOutput("MCP intercept timeout for request $id, auto-forwarding")
+            api.logging().logToOutput("Agent intercept timeout for request $id, auto-forwarding")
             ProxyRequestReceivedAction.doNotIntercept(interceptedRequest)
         } catch (e: Exception) {
             store.removeMessage(id)
-            api.logging().logToOutput("MCP intercept error for request $id: ${e.message}")
+            api.logging().logToOutput("Agent intercept error for request $id: ${e.message}")
             ProxyRequestReceivedAction.doNotIntercept(interceptedRequest)
         }
     }
@@ -178,7 +178,7 @@ class InterceptManager(private val api: MontoyaApi) {
             return ProxyResponseReceivedAction.continueWith(interceptedResponse)
         }
 
-        api.logging().logToOutput("MCP intercepted response $id: $statusCode for $initiatingMethod $initiatingUrl")
+        api.logging().logToOutput("Agent intercept holding response $id: $statusCode for $initiatingMethod $initiatingUrl")
 
         return try {
             when (val resolution = future.get(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
@@ -196,11 +196,11 @@ class InterceptManager(private val api: MontoyaApi) {
             }
         } catch (_: TimeoutException) {
             store.removeMessage(id)
-            api.logging().logToOutput("MCP intercept timeout for response $id, auto-forwarding")
+            api.logging().logToOutput("Agent intercept timeout for response $id, auto-forwarding")
             ProxyResponseReceivedAction.doNotIntercept(interceptedResponse)
         } catch (e: Exception) {
             store.removeMessage(id)
-            api.logging().logToOutput("MCP intercept error for response $id: ${e.message}")
+            api.logging().logToOutput("Agent intercept error for response $id: ${e.message}")
             ProxyResponseReceivedAction.doNotIntercept(interceptedResponse)
         }
     }

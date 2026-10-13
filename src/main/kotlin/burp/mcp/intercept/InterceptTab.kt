@@ -31,7 +31,8 @@ import javax.swing.table.AbstractTableModel
 import javax.swing.table.DefaultTableCellRenderer
 
 /**
- * Lean monitoring view of the MCP intercept queue. Single toolbar row,
+ * Lean monitoring view of the agent intercept queue — Burp Proxy traffic held for the MCP
+ * client to forward, edit or drop. Single toolbar row,
  * dense table with theme-aware status/method coloring, and the Burp-native
  * request/response editor below.
  */
@@ -78,7 +79,11 @@ class InterceptTab(
             add(UiKit.statusDot(if (state) UiKit.Status.RUNNING else UiKit.Status.STOPPED, 12), BorderLayout.CENTER)
         }
         statusText = JLabel(if (state) "Enabled" else "Disabled").apply { font = UiKit.fontHeader() }
-        val toggle = JCheckBox("Intercept", state).apply { font = UiKit.fontBody() }
+        val toggle = JCheckBox("Hold proxy traffic", state).apply {
+            font = UiKit.fontBody()
+            toolTipText = "Hold requests and responses passing through Burp Proxy here until the MCP client " +
+                "(or you) forwards, edits or drops them. Separate from Burp's own Proxy → Intercept."
+        }
         pendingCountLabel = JLabel("Pending: 0").apply { font = UiKit.fontBody() }
         autoScroll = JCheckBox("Auto-scroll", true).apply { font = UiKit.fontBody() }
         val forwardAllButton = JButton("Forward All & Disable").apply { isEnabled = state }

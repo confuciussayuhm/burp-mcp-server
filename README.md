@@ -5,12 +5,9 @@ Burp Suite extension that exposes an MCP server, letting LLM-powered tools inter
 ## Features
 
 - **30 MCP tools** across categories: HTTP requests, proxy history, encoding, scanner, Collaborator, intercept, config, editor, Repeater/Intruder
-- **Programmatic proxy intercept** — hold, inspect, modify, forward, or drop requests and responses from an MCP client
+- **Agent intercept** — hold Burp Proxy traffic so the MCP client can inspect, modify, forward, or drop requests and responses
 - **Streamable HTTP transport** on configurable host:port (default `127.0.0.1:9876`)
-- **Non-blocking approval queue** — MCP-initiated HTTP requests and history access raise pending approvals you resolve from the **Approvals** panel, with a record of recent decisions
-- **Burp Target Scope integration** — anything in **Target → Scope** can be auto-approved without queueing
-- **Capture mode** — optionally auto-approve *every* new target and add it to the auto-approve list as you browse
-- **Auto-approve targets** by hostname, host:port, or wildcard pattern, addable via a right-click **MCP: Auto-approve target** context menu
+- **No approval prompts** — every tool works as soon as the client connects. Approving individual tool calls is left to your MCP client (e.g. Claude Code's permission prompts), as in [caido-mcp-server](https://github.com/c0tton-fluff/caido-mcp-server)
 - **Auto-restart** — the server restarts automatically when you change the bind host or port
 
 ## Requirements
@@ -91,41 +88,8 @@ All settings are configurable from the **MCP → Server** tab in Burp Suite and 
 | `enabled` | Boolean | `true` | Start the MCP server when the extension loads |
 | `host` | String | `127.0.0.1` | Bind address for the HTTP server |
 | `port` | Int | `9876` | Listen port for the HTTP server |
-| `requireHttpRequestApproval` | Boolean | `true` | Queue a pending approval before MCP-initiated HTTP requests are sent |
-| `requireHistoryAccessApproval` | Boolean | `true` | Queue a pending approval before exposing proxy history to MCP clients |
-| `useBurpScopeForApproval` | Boolean | `true` | Auto-approve any target already in Burp's **Target → Scope** without queueing |
-| `autoApproveAllNewTargets` | Boolean | `false` | **Capture mode** — auto-approve every new target and add it to the auto-approve list as `host:port` |
-| `alwaysAllowHttpHistory` | Boolean | `false` | Skip the approval queue for HTTP history access |
-| `alwaysAllowWebSocketHistory` | Boolean | `false` | Skip the approval queue for WebSocket history access |
-| `configEditingTooling` | Boolean | `false` | Enable `set_project_options` / `set_user_options` tools |
-| `autoApproveTargets` | String | *(empty)* | Comma-separated list of auto-approved hosts |
 
-### Auto-Approve Target Format
-
-| Format | Example | Behavior |
-|--------|---------|----------|
-| `hostname` | `example.com` | Exact match on hostname (any port) |
-| `hostname:port` | `example.com:8443` | Exact match on hostname and port |
-| `*.domain` | `*.internal.corp` | Wildcard — matches any subdomain |
-
-Targets can be added in several ways:
-
-- Typed into the **Approved targets** list on the **MCP → Server → Approvals** panel
-- Resolving a pending approval with **Approve host** or **Approve host:port**
-- Right-clicking a request/response anywhere in Burp and choosing **MCP: Auto-approve target** (supports single hosts, host:port, and bulk-adding all selected targets)
-- Automatically, while **capture mode** is enabled
-
-## Approvals
-
-When `requireHttpRequestApproval` or `requireHistoryAccessApproval` is enabled, MCP actions that aren't already covered (by an auto-approve target, Burp scope, or an always-allow setting) raise a **pending approval** instead of blocking. The MCP client receives an immediate "pending approval queued" response, and the request is held until you decide.
-
-Resolve pending approvals from the **MCP → Server → Approvals** panel:
-
-1. **Pending** — each entry shows the target host:port (or history type) and how many times it has been hit while waiting
-2. **Decide** — **Approve host** / **Approve host:port** adds the target to the auto-approve list and releases it; **Always allow** clears the queue for a history type; **Deny** rejects it
-3. **History** — recently resolved approvals are kept in a **Recent decisions** list for reference
-
-The **Server** sub-tab title shows a badge with the current pending-approval count. The **Approvals** panel also reflects whether Burp scope auto-approval is active and how many targets are currently approved, and includes a **Check scope** helper to test whether a given host/URL is in Burp's scope.
+The server has no authentication and no approval step: anything that can reach the port can drive Burp. Keep the bind host on `127.0.0.1` unless you intend to expose it.
 
 ## Tools
 
@@ -143,7 +107,7 @@ The **Server** sub-tab title shows a badge with the current pending-approval cou
 | `create_repeater_tab` | Create a new Repeater tab with a request |
 | `send_to_intruder` | Send a request to Intruder |
 | `set_task_execution_engine_state` | Pause or resume Burp's task execution engine |
-| `set_proxy_intercept_state` | Enable or disable Burp's native proxy intercept |
+| `set_proxy_intercept_state` | Enable or disable Burp's own Proxy → Intercept (not visible to MCP tools — see [Agent Intercept](#agent-intercept)) |
 | `get_active_editor_contents` | Get contents of the active message editor |
 | `set_active_editor_contents` | Set contents of the active message editor |
 
@@ -163,8 +127,8 @@ The **Server** sub-tab title shows a badge with the current pending-approval cou
 |------|-------------|
 | `output_project_options` | Export current project-level config as JSON |
 | `output_user_options` | Export current user-level config as JSON |
-| `set_project_options` | Import project-level config from JSON *(requires `configEditingTooling` enabled)* |
-| `set_user_options` | Import user-level config from JSON *(requires `configEditingTooling` enabled)* |
+| `set_project_options` | Import project-level config from JSON |
+| `set_user_options` | Import user-level config from JSON |
 
 ### Proxy History
 
@@ -201,34 +165,39 @@ Repeater/Intruder, driven programmatically.
 | `generate_collaborator_payload` | Generate a Burp Collaborator payload URL for OOB testing |
 | `get_collaborator_interactions` | Poll for Collaborator interactions (DNS, HTTP, SMTP) |
 
-### MCP Intercept
+### Agent Intercept
 
 | Tool | Description |
 |------|-------------|
-| `set_mcp_intercept_enabled` | Enable or disable MCP-based proxy interception |
+| `set_mcp_intercept_enabled` | Turn the agent intercept on or off |
 | `get_intercepted_requests` | List pending intercepted HTTP requests |
 | `get_intercepted_responses` | List pending intercepted HTTP responses |
 | `get_intercepted_message_detail` | Get full raw content of an intercepted message |
 | `forward_intercepted_message` | Forward a message, optionally with modifications |
 | `drop_intercepted_message` | Drop a message, preventing delivery |
 
-## MCP Intercept
+## Agent Intercept
 
-MCP Intercept provides programmatic proxy interception, independent of Burp's native intercept toggle.
+The agent intercept holds HTTP traffic passing through **Burp Proxy** (e.g. from a browser using Burp as its proxy) so the MCP client can decide what happens to each message. It is:
+
+- **not** Burp's own **Proxy → Intercept** — that queue is driven from Burp's UI and the Montoya API cannot read it, which is why this extension keeps a queue of its own;
+- **not** an intercept of the MCP connection — traffic between your agent and Burp is never held.
+
+Turn it on with `set_mcp_intercept_enabled`, or with **Hold proxy traffic for the agent** under **MCP → Server**. Held messages appear in the **MCP → Agent Intercept** tab, where you can also forward, edit, or drop them by hand.
 
 ### Workflow
 
 1. **Enable** — call `set_mcp_intercept_enabled` with `enabled: true`; Burp begins holding proxied traffic
-2. **Inspect** — call `get_intercepted_requests` / `get_intercepted_responses` to list pending messages
+2. **Inspect** — call `get_intercepted_requests` / `get_intercepted_responses` to list held messages
 3. **Read** — call `get_intercepted_message_detail` with a message ID to view the full raw HTTP content
 4. **Act** — either:
-   - `forward_intercepted_message` to send it on (optionally supply `modifiedRaw` to alter the content)
+   - `forward_intercepted_message` to send it on (optionally supply `modifiedRaw` or `replacements` to alter the content)
    - `drop_intercepted_message` to silently discard it
 5. **Disable** — call `set_mcp_intercept_enabled` with `enabled: false` to auto-forward all remaining messages and stop intercepting
 
 ### Limits
 
-- **Timeout**: 120 seconds — unhandled messages are auto-forwarded after this period
+- **Timeout**: 10 minutes — unhandled messages are auto-forwarded after this period
 - **Max pending**: 50 messages — when the queue is full, new messages pass through without being held
 
 ## License
