@@ -23,3 +23,7 @@ META-INF/
 # OS
 .DS_Store
 Thumbs.db
+
+# MCP
+.mcp.json
+.claude/settings.local.json
