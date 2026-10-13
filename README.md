@@ -89,7 +89,9 @@ All settings are configurable from the **MCP → Server** tab in Burp Suite and 
 | `host` | String | `127.0.0.1` | Bind address for the HTTP server |
 | `port` | Int | `9876` | Listen port for the HTTP server |
 
-The server has no authentication and no approval step: anything that can reach the port can drive Burp. Keep the bind host on `127.0.0.1` unless you intend to expose it.
+The server has no authentication and no approval step: any program that can reach the port can drive Burp. Keep the bind host on `127.0.0.1` unless you intend to expose it.
+
+Requests sent by a web browser (anything carrying an `Origin` header) are refused with `403`, so a web page open in your browser cannot drive Burp — including through DNS rebinding. MCP clients such as Claude Code send no `Origin` header and are unaffected; browser-based MCP clients are not supported.
 
 ## Tools
 

@@ -14,7 +14,6 @@ import io.ktor.server.netty.*
 import io.ktor.serialization.kotlinx.json.*
 import io.modelcontextprotocol.kotlin.sdk.types.McpJson
 import io.ktor.server.plugins.contentnegotiation.*
-import io.ktor.server.plugins.cors.routing.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
@@ -27,6 +26,26 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 enum class ServerState { Stopped, Starting, Running, Stopping, Failed }
+
+/**
+ * Refuses anything a web browser sent. Browsers put an Origin header on every POST — cross-site,
+ * same-site and DNS-rebinding ones alike — while MCP clients such as Claude Code send none. Without
+ * this, any page open in the browser could drive Burp: a rebinding page counts as same-origin, so
+ * withholding CORS alone does not stop it. The SDK's own allowedOrigins check is no use here: it
+ * also rejects a MISSING Origin, which would lock out every non-browser client.
+ */
+internal fun Application.rejectBrowserRequests(onRejected: (origin: String) -> Unit) {
+    intercept(ApplicationCallPipeline.Plugins) {
+        val origin = call.request.headers[HttpHeaders.Origin] ?: return@intercept
+        onRejected(origin)
+        call.respondText(
+            """{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"Browser requests are not accepted"}}""",
+            ContentType.Application.Json,
+            HttpStatusCode.Forbidden
+        )
+        finish()
+    }
+}
 
 class McpServer(
     private val api: MontoyaApi,
@@ -65,19 +84,8 @@ class McpServer(
                         json(McpJson)
                     }
 
-                    install(CORS) {
-                        anyHost()
-
-                        allowMethod(HttpMethod.Get)
-                        allowMethod(HttpMethod.Post)
-
-                        allowHeader(HttpHeaders.ContentType)
-                        allowHeader(HttpHeaders.Accept)
-                        allowHeader("Last-Event-ID")
-
-                        allowCredentials = false
-                        allowNonSimpleContentTypes = true
-                        maxAgeInSeconds = 3600
+                    rejectBrowserRequests { origin ->
+                        api.logging().logToOutput("MCP server refused a browser request (Origin: $origin)")
                     }
 
                     mcpStatelessStreamableHttp {
