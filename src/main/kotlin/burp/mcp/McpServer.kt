@@ -4,6 +4,7 @@ import burp.api.montoya.MontoyaApi
 import burp.mcp.approval.ApprovalPolicy
 import burp.mcp.collab.CollaboratorBroker
 import burp.mcp.history.McpRequestHistory
+import burp.mcp.history.ProxyHandlerCaptureStore
 import burp.mcp.intercept.InterceptManager
 import burp.mcp.session.SessionStore
 import burp.mcp.tools.registerTools
@@ -35,7 +36,8 @@ class McpServer(
     private val policy: ApprovalPolicy,
     private val requestHistory: McpRequestHistory,
     private val sessionStore: SessionStore,
-    private val collaborator: CollaboratorBroker
+    private val collaborator: CollaboratorBroker,
+    private val handlerCaptures: ProxyHandlerCaptureStore
 ) {
 
     private var server: EmbeddedServer<*, *>? = null
@@ -88,7 +90,7 @@ class McpServer(
                                     tools = ServerCapabilities.Tools(listChanged = false)
                                 )
                             )
-                        ).also { it.registerTools(api, config, interceptManager, policy, requestHistory, sessionStore, collaborator) }
+                        ).also { it.registerTools(api, config, interceptManager, policy, requestHistory, sessionStore, collaborator, handlerCaptures) }
                     }
 
                     routing {

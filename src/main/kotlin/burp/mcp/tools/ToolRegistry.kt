@@ -18,6 +18,7 @@ import burp.mcp.approval.ApprovalPolicy
 import burp.mcp.collab.CollaboratorBroker
 import burp.mcp.history.McpRequestHistory
 import burp.mcp.history.McpRequestRecord
+import burp.mcp.history.ProxyHandlerCaptureStore
 import burp.mcp.intercept.InterceptManager
 import burp.mcp.intercept.MessageResolution
 import burp.mcp.intercept.PendingRequest
@@ -41,6 +42,10 @@ private fun maskSecret(s: String): String =
     if (s.length <= 12) "${s.take(4)}…(${s.length})" else "${s.take(10)}…(${s.length})"
 
 // parseSetCookie / rollForwardCookies moved to burp.mcp.session.CookieRoll (shared with KeepAliveManager).
+
+// Per-body cap for the proxy-history list/regex views. Applied to each body field before
+// serialisation so the emitted JSON is always valid; the single-item and raw tools are uncapped.
+private const val PROXY_LIST_BODY_CAP = 5000
 
 private fun truncateIfNeeded(serialized: String): String {
     return if (serialized.length > 5000) {
@@ -191,7 +196,8 @@ fun Server.registerTools(
     policy: ApprovalPolicy,
     requestHistory: McpRequestHistory,
     sessionStore: SessionStore,
-    collaborator: CollaboratorBroker
+    collaborator: CollaboratorBroker,
+    handlerCaptures: ProxyHandlerCaptureStore
 ) {
 
     // 1. send_http1_request
@@ -375,9 +381,10 @@ fun Server.registerTools(
         val decision = policy.checkHistory("HTTP")
         if (decision is ApprovalDecision.Deny) return@mcpPaginatedTool sequenceOf(decision.reason)
         filterProxyHistory(api.proxy().history(), statusCodes, methods, host, mimeTypes, inScopeOnly == true)
-            .map { truncateIfNeeded(compactJson.encodeToString(it.toSerializableProxyForm(
-                includeRequestBody != false, includeResponseBody != false, includeHeaders != false
-            ))) }
+            .map { compactJson.encodeToString(it.toSerializableProxyForm(
+                includeRequestBody != false, includeResponseBody != false, includeHeaders != false,
+                maxBodyChars = PROXY_LIST_BODY_CAP, capture = handlerCaptures.get(it.id())
+            )) }
     }
 
     // 19. get_proxy_http_history_regex (paginated)
@@ -388,9 +395,10 @@ fun Server.registerTools(
         if (decision is ApprovalDecision.Deny) return@mcpPaginatedTool sequenceOf(decision.reason)
         val compiledRegex = Pattern.compile(regex)
         filterProxyHistory(api.proxy().history { it.contains(compiledRegex) }, statusCodes, methods, host, mimeTypes, inScopeOnly == true)
-            .map { truncateIfNeeded(compactJson.encodeToString(it.toSerializableProxyForm(
-                includeRequestBody != false, includeResponseBody != false, includeHeaders != false
-            ))) }
+            .map { compactJson.encodeToString(it.toSerializableProxyForm(
+                includeRequestBody != false, includeResponseBody != false, includeHeaders != false,
+                maxBodyChars = PROXY_LIST_BODY_CAP, capture = handlerCaptures.get(it.id())
+            )) }
     }
 
     // 19b. get_proxy_http_history_item (single item by ID)
@@ -407,7 +415,7 @@ fun Server.registerTools(
             ?: return@mcpTool "No history item found with ID: $id"
         compactJson.encodeToString(item.toSerializableProxyForm(
             includeRequestBody = true, includeResponseBody = true, includeHeaders = true,
-            includeModifiedVersions = true
+            includeModifiedVersions = true, capture = handlerCaptures.get(item.id())
         ))
     }
 
@@ -1041,7 +1049,7 @@ fun Server.registerTools(
         compactJson.encodeToString(
             item.toSerializableProxyForm(
                 includeRequestBody = true, includeResponseBody = true, includeHeaders = true,
-                includeModifiedVersions = true, includeRaw = true
+                includeModifiedVersions = true, includeRaw = true, capture = handlerCaptures.get(item.id())
             )
         )
     }

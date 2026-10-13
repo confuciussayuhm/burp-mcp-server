@@ -6,6 +6,7 @@ import burp.api.montoya.proxy.ProxyWebSocketMessage
 import burp.api.montoya.scanner.audit.issues.AuditIssue
 import burp.api.montoya.websocket.Direction
 import burp.mcp.history.McpRequestRecord
+import burp.mcp.history.ProxyHandlerCapture
 import kotlinx.serialization.Serializable
 
 fun AuditIssue.toSerializableForm(): IssueDetails {
@@ -61,12 +62,42 @@ private fun bodyToStringOrNull(msg: burp.api.montoya.http.message.HttpMessage): 
     return try { msg.bodyToString().ifEmpty { null } } catch (_: Exception) { null }
 }
 
+/**
+ * Cap a body string at [maxChars] for list/browse views, appending a marker that records how many
+ * characters were dropped. The result stays a JSON-valid string value (unlike chopping the whole
+ * serialised object), so a large body never breaks the emitted JSON. A null
+ * [maxChars] means "no cap" — used by the single-item and raw tools that must return full bytes.
+ */
+private fun capBody(body: String?, maxChars: Int?): String? {
+    if (body == null || maxChars == null || body.length <= maxChars) return body
+    val dropped = body.length - maxChars
+    return body.substring(0, maxChars) + "…[+$dropped chars truncated — use get_proxy_http_history_item or _raw for full body]"
+}
+
+/** Split a raw HTTP message at the header/body separator into (head incl. start-line, body-or-null). */
+private fun splitRaw(raw: String): Pair<String, String?> {
+    val separator = raw.indexOf("\r\n\r\n")
+    if (separator < 0) return raw to null
+    return raw.substring(0, separator) to raw.substring(separator + 4).ifEmpty { null }
+}
+
+/** Header lines only (start-line dropped), matching [headersToString]'s shape of a header block. */
+private fun headerLinesOnly(head: String): String? {
+    val firstBreak = head.indexOf("\r\n")
+    if (firstBreak < 0) return null
+    return head.substring(firstBreak + 2).ifEmpty { null }
+}
+
 fun ProxyHttpRequestResponse.toSerializableProxyForm(
     includeRequestBody: Boolean = true,
     includeResponseBody: Boolean = true,
     includeHeaders: Boolean = true,
     includeModifiedVersions: Boolean = false,
-    includeRaw: Boolean = false
+    includeRaw: Boolean = false,
+    // Per-body character cap for list/browse views. null = no cap (single-item / raw tools).
+    maxBodyChars: Int? = null,
+    // This item's request/response as other extensions' proxy handlers left it, when the live capturer saw it.
+    capture: ProxyHandlerCapture? = null
 ): SerializableProxyHttpItem {
     val req = request()
     val finalReq = try { finalRequest() } catch (_: Exception) { null }
@@ -74,13 +105,57 @@ fun ProxyHttpRequestResponse.toSerializableProxyForm(
     val origResp = try { originalResponse() } catch (_: Exception) { null }
     val service = try { httpService() } catch (_: Exception) { null }
 
-    val reqModified = try {
+    val reqBodyBase = if (req != null) bodyToStringOrNull(req) else null
+    val respBodyBase = if (resp != null) bodyToStringOrNull(resp) else null
+
+    // A live capture overrides the Montoya history value, which reads back as the as-received bytes even
+    // when an extension rewrote the message in its proxy handlers (montoya-api #127). A capture identical
+    // to the history value changes nothing, so the Montoya value stands. Mapping, as Burp presents these
+    // items: the captured REQUEST is the "modified/final request" variant, the captured RESPONSE is the
+    // "original response" variant.
+    val reqCap = capture?.requestRaw?.let(::splitRaw)
+    val respCap = capture?.responseRaw?.let(::splitRaw)
+
+    val reqCaptureModified = reqCap != null && reqCap.second != reqBodyBase
+    val respCaptureModified = respCap != null && respCap.second != respBodyBase
+
+    val montoyaReqModified = try {
         req != null && finalReq != null && req.toString() != finalReq.toString()
     } catch (_: Exception) { false }
 
-    val respModified = try {
+    val montoyaRespModified = try {
         resp != null && origResp != null && resp.toString() != origResp.toString()
     } catch (_: Exception) { false }
+
+    val reqModified = reqCaptureModified || montoyaReqModified
+    val respModified = respCaptureModified || montoyaRespModified
+
+    // Effective modified/final request + original response: prefer the capture, else Montoya.
+    val finalReqHeaders = when {
+        reqCaptureModified -> headerLinesOnly(reqCap!!.first)
+        montoyaReqModified && finalReq != null -> headersToString(finalReq)
+        else -> null
+    }
+    val finalReqBody = when {
+        reqCaptureModified -> reqCap!!.second
+        montoyaReqModified && finalReq != null -> bodyToStringOrNull(finalReq)
+        else -> null
+    }
+    val finalReqRaw = when {
+        reqCaptureModified -> capture!!.requestRaw
+        montoyaReqModified && finalReq != null -> try { finalReq.toString() } catch (_: Exception) { null }
+        else -> null
+    }
+    val origRespHeaders = when {
+        respCaptureModified -> headerLinesOnly(respCap!!.first)
+        montoyaRespModified && origResp != null -> headersToString(origResp)
+        else -> null
+    }
+    val origRespBody = when {
+        respCaptureModified -> respCap!!.second
+        montoyaRespModified && origResp != null -> bodyToStringOrNull(origResp)
+        else -> null
+    }
 
     val wasEdited = try { edited() } catch (_: Exception) { false }
 
@@ -94,26 +169,23 @@ fun ProxyHttpRequestResponse.toSerializableProxyForm(
         statusCode = try { resp?.statusCode()?.toInt() } catch (_: Exception) { null },
         mimeType = try { mimeType()?.name } catch (_: Exception) { null },
         requestHeaders = if (includeHeaders && req != null) headersToString(req) else null,
-        requestBody = if (includeRequestBody && req != null) bodyToStringOrNull(req) else null,
+        requestBody = if (includeRequestBody && req != null) capBody(reqBodyBase, maxBodyChars) else null,
         responseHeaders = if (includeHeaders && resp != null) headersToString(resp) else null,
-        responseBody = if (includeResponseBody && resp != null) bodyToStringOrNull(resp) else null,
+        responseBody = if (includeResponseBody && resp != null) capBody(respBodyBase, maxBodyChars) else null,
         requestModified = reqModified,
         responseModified = respModified,
         edited = wasEdited,
-        finalRequestHeaders = if (includeModifiedVersions && reqModified && includeHeaders && finalReq != null)
-            headersToString(finalReq) else null,
-        finalRequestBody = if (includeModifiedVersions && reqModified && includeRequestBody && finalReq != null)
-            bodyToStringOrNull(finalReq) else null,
-        originalResponseHeaders = if (includeModifiedVersions && respModified && includeHeaders && origResp != null)
-            headersToString(origResp) else null,
-        originalResponseBody = if (includeModifiedVersions && respModified && includeResponseBody && origResp != null)
-            bodyToStringOrNull(origResp) else null,
+        finalRequestHeaders = if (includeModifiedVersions && reqModified && includeHeaders) finalReqHeaders else null,
+        finalRequestBody = if (includeModifiedVersions && reqModified && includeRequestBody)
+            capBody(finalReqBody, maxBodyChars) else null,
+        originalResponseHeaders = if (includeModifiedVersions && respModified && includeHeaders) origRespHeaders else null,
+        originalResponseBody = if (includeModifiedVersions && respModified && includeResponseBody)
+            capBody(origRespBody, maxBodyChars) else null,
         notes = annotations()?.notes(),
         // Full raw request bytes including the start-line (method/path/version), which the
         // split headers/body fields drop. Needed to round-trip a captured request faithfully.
         rawRequest = if (includeRaw && req != null) try { req.toString() } catch (_: Exception) { null } else null,
-        rawFinalRequest = if (includeRaw && reqModified && finalReq != null)
-            try { finalReq.toString() } catch (_: Exception) { null } else null
+        rawFinalRequest = if (includeRaw && reqModified) finalReqRaw else null
     )
 }
 

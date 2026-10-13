@@ -6,6 +6,8 @@ import burp.mcp.approval.ApprovalPolicy
 import burp.mcp.approval.PendingApprovalManager
 import burp.mcp.collab.CollaboratorBroker
 import burp.mcp.history.McpRequestHistory
+import burp.mcp.history.ProxyHandlerCaptureStore
+import burp.mcp.history.ProxyHandlerCapturer
 import burp.mcp.intercept.InterceptManager
 import burp.mcp.intercept.InterceptTab
 import burp.mcp.session.KeepAliveManager
@@ -33,12 +35,19 @@ class BurpMcpExtension : BurpExtension {
         api.http().registerHttpHandler(sessionInjector)
         sessionInjector.start()
 
+        // Capture each proxy message as other extensions' proxy handlers leave it. proxy().history()
+        // reads back the as-received bytes (montoya-api #127), so without this a body rewritten by
+        // another extension is invisible to the proxy-history tools.
+        val handlerCaptures = ProxyHandlerCaptureStore()
+        val handlerCapturer = ProxyHandlerCapturer(api, handlerCaptures)
+        handlerCapturer.register()
+
         // One Collaborator client for the whole extension load. The MCP transport is stateless and
         // re-registers tools per request, so anything the collaborator tools need to remember between
         // calls has to be owned out here.
         val collaborator = CollaboratorBroker(api, api.persistence().extensionData())
 
-        val server = McpServer(api, config, interceptManager, policy, requestHistory, sessionStore, collaborator)
+        val server = McpServer(api, config, interceptManager, policy, requestHistory, sessionStore, collaborator, handlerCaptures)
 
         val tabbedPane = JTabbedPane()
         val serverTab = ServerTab(api, config, server, interceptManager, approvals, policy)
@@ -84,6 +93,7 @@ class BurpMcpExtension : BurpExtension {
             approvals.removeListener(approvalsBadgeListener)
             serverTab.cleanup()
             sessionInjector.stop()
+            handlerCapturer.deregister()
             keepAliveManager.stop()
             // shutdown(), not stop(): stop() leaves the server's single-thread executor alive, so
             // every extension reload leaked a thread.
